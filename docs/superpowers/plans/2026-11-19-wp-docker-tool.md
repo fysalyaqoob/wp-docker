@@ -16,7 +16,7 @@
 - macOS support is written to spec and not testable on the owner's machine; mark it "untested on macOS" in the README until a Mac user confirms.
 - Default TLD `.test`. Never `.local`.
 - Sites root: env `WPD_SITES_ROOT`, then `~/.wpd/config.json`, then default `~/Sites`. `wpd setup` asks once and saves it. The owner's value is `D:\Development\Clients` (nothing for sites on C:); that value is never a code default.
-- Site files AND database data bind-mounted under `<SitesRoot>\<name>\`.
+- Hybrid layout: WordPress core, uploads and DB data in Docker volumes; only `wp-content/themes`, `plugins` and `mu-plugins` bind-mounted from `<SitesRoot>\<name>\wp-content\`. Per-site mkcert certificate with the site name as SAN (no `*.test` wildcard: Windows Schannel rejects it). Traefik v3.6+ (v3.1 fails on Docker 29). README and `wpd doctor` explain moving Docker Desktop's disk image to D:.
 - Ports 80/443 owned by Traefik; CLI reports the holder generically (no hard-coded Laragon). It may stop a recognized local server (Laragon, XAMPP, WAMP, IIS, nginx, Apache) only after an explicit interactive yes, records it in `~\.wpd\stopped.json`, and `wpd resume` restarts it. Never silent, never default, never for unrecognized processes.
 - DNS: dnsmasq answers `*.test` with `127.0.0.1`. One-time OS hook: Windows NRPT rule for namespace `.test`; macOS `/etc/resolver/test` containing `nameserver 127.0.0.1` (sudo once). Both via `Register-TestDns`.
 - PHP limits baked in: `upload_max_filesize`/`post_max_size` 2G, `memory_limit` 512M, `max_execution_time` 600.
@@ -74,7 +74,7 @@
 
 **Interfaces:**
 - Consumes: Task 2 `Get-WpdConfig`, `Invoke-Docker`, `Get-PortHolder`.
-- Produces: `Stop-PortConflicts([switch]$Confirm) -> void` (asks per recognized server, stops only on yes, writes `~\.wpd\stopped.json` with name, kind (service or process), and restart command); `Resume-PortConflicts() -> void` (restarts what the file lists, reports each, clears the file; no-op with a message if the file is absent); `Initialize-Infra() -> void` (idempotent: network, mkcert wildcard cert, dnsmasq, Traefik, NRPT rule); `Test-Infra() -> [pscustomobject[]]` each `@{Name; Ok; Fix}`, checks: Docker running, ports 80/443 holder, port 53 holder, mkcert installed and CA trusted, NRPT rule present, `wpd-net` exists, Traefik and DNS containers up.
+- Produces: `Stop-PortConflicts([switch]$Confirm) -> void` (asks per recognized server, stops only on yes, writes `~\.wpd\stopped.json` with name, kind (service or process), and restart command); `Resume-PortConflicts() -> void` (restarts what the file lists, reports each, clears the file; no-op with a message if the file is absent); `Initialize-Infra() -> void` (idempotent: network, mkcert local CA, dnsmasq, Traefik, NRPT rule); `Test-Infra() -> [pscustomobject[]]` each `@{Name; Ok; Fix}`, checks: Docker running, ports 80/443 holder, port 53 holder, mkcert installed and CA trusted, NRPT rule present, `wpd-net` exists, Traefik and DNS containers up.
 
 - [ ] **Step 1:** Unit tests: `Stop-PortConflicts` with a mocked holder `httpd` and a "no" answer stops nothing and writes no state; with "yes" it stops it and the state file lists it; `Resume-PortConflicts` restarts exactly what the state file lists and clears it; an unrecognized holder is never stopped. Unit test `Test-Infra` with mocked `Get-PortHolder` returning `httpd`: result contains a failing item whose `Fix` names `httpd` and mentions `wpd setup` offering to stop it. Mock holder `svchost` on 53: `Fix` mentions Internet Connection Sharing. Integration test (tag): after `Initialize-Infra` twice, `Test-Infra` all `Ok`.
 - [ ] **Step 2:** Run; expect FAIL.
@@ -91,7 +91,7 @@
 
 - [ ] **Step 1:** Tests: `Format-SiteCompose` output contains Traefik host rule ``Host(`acme.test`)``, bind mounts under the site folder, and the chosen PHP tag; `New-WpdSite` on an existing folder throws and changes nothing; `Remove-WpdSite` without `-Force` and without confirmation leaves the folder intact. Integration: `New-WpdSite smoke` then `Invoke-WebRequest https://smoke.test` returns 200, and the wp-admin login with the returned credentials works.
 - [ ] **Step 2:** Run; expect FAIL.
-- [ ] **Step 3:** Implement. Generate random DB and admin passwords; store them in `<site>\.wpd-credentials.txt` (git-ignored by tool-generated `.gitignore` inside the site folder). Install WordPress with WP-CLI; write the PHP ini and WP constants from Global Constraints.
+- [ ] **Step 3:** Implement. Issue a per-site mkcert cert (site name as SAN) into Traefik's watched dynamic-config folder; report the measured hybrid page load in the task report. Generate random DB and admin passwords; store them in `<site>\.wpd-credentials.txt` (git-ignored by tool-generated `.gitignore` inside the site folder). Install WordPress with WP-CLI; write the PHP ini and WP constants from Global Constraints.
 - [ ] **Step 4:** Run; expect PASS. Commit `feat: new site and lifecycle`.
 
 ### Task 5: Clone safety defaults
@@ -120,7 +120,7 @@
 **Files:** Create `lib/Wpress.ps1`, `tests/Wpress.Tests.ps1`.
 
 **Interfaces:**
-- Produces: `Expand-Wpress([string]$File, [string]$Destination) -> [pscustomobject]@{DatabasePath; FileCount; OldUrl}` (layout as recorded in Task 1; streams the file, handles sizes over 4 GB; throws on a truncated archive or missing `database.sql`); `Import-Wpress([string]$Name, [string]$File) -> [pscustomobject]` (create blank site, expand, replace `SERVMASK_PREFIX_` with the site's table prefix, import DB, run `Set-CloneSafety`).
+- Produces: `Expand-Wpress([string]$File, [string]$Destination) -> [pscustomobject]@{DatabasePath; FileCount; OldUrl}` (layout as recorded in `docs/spike-notes.md`: 4377-byte headers, archive end detected by an empty name field NOT an all-zero block, `database.sql` sits near the end of the archive; streams the file, handles sizes over 4 GB; throws on a truncated archive or missing `database.sql`); `Import-Wpress([string]$Name, [string]$File) -> [pscustomobject]` (create blank site, expand, replace `SERVMASK_PREFIX_` with the site's table prefix, import DB, run `Set-CloneSafety`).
 
 - [ ] **Step 1:** Tests build a tiny synthetic archive in the test: expands two files plus `database.sql`; truncated archive throws; archive without `database.sql` throws; failed import leaves no site folder.
 - [ ] **Step 2:** Run; expect FAIL. **Step 3:** Implement with a `FileStream` reader; no whole-file reads. **Step 4:** Run; expect PASS. **Step 5:** Run against the real `.wpress` from Task 1; site loads at `https://<name>.test` with content intact. Commit `feat: clone from .wpress`.

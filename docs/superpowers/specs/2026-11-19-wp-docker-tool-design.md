@@ -64,15 +64,20 @@ Success: one command per job, sites reachable at `https://<name>.test` with a tr
 - **Traefik** reverse proxy owns ports 80/443, routes by hostname via Docker labels, serves mkcert certificates. Runs on a shared Docker network `wpd-net`.
 - **Local DNS container** (dnsmasq) answers `*.test` with `127.0.0.1`.
 - **Windows NRPT rule** (`Add-DnsClientNrptRule -Namespace .test`) sends only `.test` lookups to that DNS. One-time, needs admin once.
-- **mkcert**: one wildcard cert for `*.test`, installed once; CLI points Traefik at it.
+- **mkcert**: a local CA installed once; each site gets its own certificate (see Certificates).
 - `wpd setup` does all of this once and is safe to re-run. `wpd doctor` checks every piece and prints what is wrong in plain words.
 
-### Per-site stack (`D:\Development\Clients\<name>\`)
+### Per-site stack (`<SitesRoot>\<name>\`)
 
-Sites root is `D:\Development\Clients` (owner's decision: nothing for sites on C:). Configurable, but that is the default. Note: Docker Desktop keeps its own image/volume storage on C: by default, so named volumes (e.g. database data) would sit there. Assistant's call: bind-mount the database data folder under the site's D: folder too, so everything per site lives on D:. If bind-mounted MariaDB proves slow or has permission problems on Windows, the builder reports it and the owner decides (alternative: move Docker Desktop's disk image to D: in its settings).
+Owner's sites root is `D:\Development\Clients` (nothing for sites on C:). Default in code is `~/Sites`; setup asks and saves it.
 
-- `wordpress` (Apache or php-fpm image, current PHP version selectable per site), `db` (MariaDB), `wpcli` (run-on-demand).
-- Site files bind-mounted to a normal folder so the owner can open them in an editor.
+**File layout (owner decision 2026-11-19, hybrid).** The spike measured a full bind mount from D: at 1.2 to 4 s per page versus about 0.07 s in a Docker volume. So WordPress core, `uploads` and the database live in Docker volumes; only `wp-content/themes`, `wp-content/plugins` and `wp-content/mu-plugins` are bind-mounted from `<SitesRoot>\<name>\wp-content\` so the owner edits code in their editor. Task 4 measures the hybrid page load and reports it; if still slow the owner decides. Docker volumes sit in Docker Desktop's disk image (on C: by default); the README and `wpd doctor` explain how to move that image to D: (owner asked for this to be documented).
+
+**Certificates.** One certificate per site (the site name as a SAN), generated with mkcert when the site is created: a bare `*.test` wildcard is rejected by Windows Schannel (spike finding). Traefik loads certs from a watched dynamic-config folder.
+
+**Versions.** Traefik v3.6 or newer (v3.1 fails against Docker 29, spike finding).
+
+- `wordpress` (Apache image, selectable PHP), `db` (MariaDB), `wpcli` (run-on-demand), `mailpit`.
 - PHP settings baked in: large `upload_max_filesize`, `post_max_size`, `memory_limit`, `max_execution_time`, so `.wpress` imports of large sites work.
 - Traefik labels set the `<name>.test` host rule.
 - WordPress config: `WP_HOME`/`WP_SITEURL` set to the `.test` URL, `WP_ENVIRONMENT_TYPE=local`, debug on.
@@ -119,7 +124,6 @@ After any clone: run search-replace live to local URL (including serialized data
 ## More assistant's calls (from the builder check; owner can overrule)
 
 - **Laragon:** the CLI only detects and reports what holds 80/443; it never stops Laragon itself. Assumes the owner moves sites over and stops Laragon, no side-by-side running. Clean `https://name.test` stays the goal.
-- **File performance:** site files are bind-mounted from D: as decided. NTFS bind mounts are slower under Docker Desktop. The first spike measures a page load and a `.wpress` import. If too slow, the builder reports it and the owner chooses (e.g. keep only `wp-content` themes/plugins on D: and the rest in Docker volumes).
 - **SSH clone:** uses Windows OpenSSH (`ssh`, `scp`, tar over ssh); no rsync assumed. Remote WP-CLI is assumed present (owner already uses it); if missing, the CLI says so and stops. Uploads: pulled in full by default, `--no-uploads` skips them. No live-media proxying, because it would reintroduce live URLs.
 - **Safety neutralization after clone:** all outgoing mail forced to Mailpit at the container level (not just plugin settings), `DISABLE_WP_CRON` set, payment-gateway and SMTP/email-marketing plugins on a seed deactivate list (WooCommerce gateways such as Stripe/PayPal, WP Mail SMTP, Mailchimp/SendGrid-style plugins, caching and backup plugins), list editable.
 - **Skill location:** `SKILL.md` lives in this project folder; `wpd setup` offers to copy it to `~/.claude/skills`.
