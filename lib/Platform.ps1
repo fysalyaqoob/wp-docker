@@ -64,8 +64,9 @@ function Stop-VerifiedProcesses {
     foreach ($r in $Records) {
         $p = Get-Process -Id $r.Pid -ErrorAction SilentlyContinue
         if (-not $p) { continue }
-        $recorded = [DateTime]::Parse($r.StartTime, $null, [Globalization.DateTimeStyles]::RoundtripKind)
-        $same = ($p.Path -eq $r.Path) -and ([math]::Abs(($p.StartTime.ToUniversalTime() - $recorded.ToUniversalTime()).TotalSeconds) -lt 2)
+        # StartTime is UTC ticks (int64): immune to ConvertFrom-Json datetime coercion and time zones.
+        $delta = [math]::Abs($p.StartTime.ToUniversalTime().Ticks - [int64]$r.StartTime)
+        $same = ($p.Path -eq $r.Path) -and ($delta -lt 2 * [TimeSpan]::TicksPerSecond)
         if (-not $same) { throw "Process $($r.Pid) is no longer the process wpd recorded (PID reused). Nothing was stopped; stop the server manually." }
         $live += $r
     }
@@ -119,7 +120,7 @@ function Get-ServerStopPlan {
         $root = $members | Where-Object { -not $tree.Contains([int]$_.ParentProcessId) } | Select-Object -First 1
         if (-not $root) { return $null }
         $recs = @($members | ForEach-Object {
-            [pscustomobject]@{ Pid = [int]$_.ProcessId; StartTime = $_.CreationDate.ToUniversalTime().ToString('o'); Path = $_.ExecutablePath } })
+            [pscustomobject]@{ Pid = [int]$_.ProcessId; StartTime = [int64]$_.CreationDate.ToUniversalTime().Ticks; Path = $_.ExecutablePath } })
         $json = (ConvertTo-Json -InputObject $recs -Compress) -replace "'", "''"
         return [pscustomobject]@{ Name = $s.Name; Kind = 'process'
             Stop = "Stop-VerifiedProcesses -Records (ConvertFrom-Json '$json')"

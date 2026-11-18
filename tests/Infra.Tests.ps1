@@ -164,8 +164,34 @@ Describe 'Get-ServerStopPlan on Windows (Get-CimInstance, Get-PortHolderPid mock
         Mock Get-CimInstance { P 10 1; P 11 10 'C:\b\httpd.exe' }
         Get-ServerStopPlan -Holder 'httpd' -Port 80 | Should -BeNullOrEmpty
     }
-    It 'restarts all recorded PIDs with the single Start command of the root' {
-        Mock Get-CimInstance { P 10 1; P 11 10 'C:\a\httpd.exe' '"C:\a\httpd.exe" -d x -child' }
+    It 'a plan Stop string round-trips through ConvertFrom-Json and verifies a matching local-time process' {
+        # Local-kind CreationDate on a non-UTC machine; production runs the Stop string through ConvertFrom-Json.
+        $local = [datetime]::SpecifyKind([datetime]'2026-01-01T10:00:00', 'Local')
+        Mock Get-CimInstance { P 11 1 'C:\a\httpd.exe' '"C:\a\httpd.exe" -d x' $local }
+        Mock Get-Process { [pscustomobject]@{ Path = 'C:\a\httpd.exe'; StartTime = $local.AddMilliseconds(400) } }
+        Mock Stop-Process { }
+        $plan = Get-ServerStopPlan -Holder 'httpd' -Port 80
+        & ([scriptblock]::Create($plan.Stop))
+        Should -Invoke Stop-Process -Times 1
+    }
+    It 'the same round trip throws before stopping when the start time differs beyond tolerance' {
+        $local = [datetime]::SpecifyKind([datetime]'2026-01-01T10:00:00', 'Local')
+        Mock Get-CimInstance { P 11 1 'C:\a\httpd.exe' '"C:\a\httpd.exe" -d x' $local }
+        Mock Get-Process { [pscustomobject]@{ Path = 'C:\a\httpd.exe'; StartTime = $local.AddSeconds(5) } }
+        Mock Stop-Process { }
+        $plan = Get-ServerStopPlan -Holder 'httpd' -Port 80
+        { & ([scriptblock]::Create($plan.Stop)) } | Should -Throw '*PID reused*'
+        Should -Invoke Stop-Process -Times 0
+    }
+    It 'a UTC-kind CreationDate also round-trips' {
+        $utc = [datetime]'2026-01-01T10:00:00Z'
+        Mock Get-CimInstance { P 11 1 'C:\a\httpd.exe' '"C:\a\httpd.exe"' $utc.ToUniversalTime() }
+        Mock Get-Process { [pscustomobject]@{ Path = 'C:\a\httpd.exe'; StartTime = $utc.ToLocalTime() } }
+        Mock Stop-Process { }
+        & ([scriptblock]::Create((Get-ServerStopPlan -Holder 'httpd' -Port 80).Stop))
+        Should -Invoke Stop-Process -Times 1
+    }
+    It 'restarts all recorded PIDs with the single Start command of the root' {        Mock Get-CimInstance { P 10 1; P 11 10 'C:\a\httpd.exe' '"C:\a\httpd.exe" -d x -child' }
         $plan = Get-ServerStopPlan -Holder 'httpd' -Port 80
         $plan.Start | Should -Not -Match 'child'
         $plan.Start | Should -Match 'C:\\a\\httpd.exe'
@@ -176,8 +202,8 @@ Describe 'Get-ServerStopPlan on Windows (Get-CimInstance, Get-PortHolderPid mock
 Describe 'Stop-VerifiedProcesses (Get-Process and Stop-Process mocked)' {
     BeforeEach {
         $script:recs = @(
-            [pscustomobject]@{ Pid = 10; StartTime = '2026-01-01T10:00:00.0000000Z'; Path = 'C:\a\httpd.exe' }
-            [pscustomobject]@{ Pid = 11; StartTime = '2026-01-01T10:00:01.0000000Z'; Path = 'C:\a\httpd.exe' })
+            [pscustomobject]@{ Pid = 10; StartTime = ([datetime]'2026-01-01T10:00:00Z').ToUniversalTime().Ticks; Path = 'C:\a\httpd.exe' }
+            [pscustomobject]@{ Pid = 11; StartTime = ([datetime]'2026-01-01T10:00:01Z').ToUniversalTime().Ticks; Path = 'C:\a\httpd.exe' })
         Mock Stop-Process { }
     }
     It 'stops matching processes' {
