@@ -19,7 +19,7 @@ Success: one command per job, sites reachable at `https://<name>.test` with a tr
   - All-in-One WP Migration `.wpress` file (the most common case).
 - 1-2 sites run at once, each on its own `<name>.test` domain with HTTPS (mkcert).
 - Adding a site needs no hosts-file edit and no admin prompt after one-time setup.
-- Windows 11 first. Docker Desktop is already installed and running (v29.8.1).
+- Windows 11 and macOS (owner decision 2026-11-19: it must also work on Mac). Runtime: PowerShell 7 on both (chosen by owner over Python and Go). macOS is written to spec and untested by the owner; README says so until a Mac user confirms. Docker Desktop is installed on the owner's Windows machine (v29.8.1).
 - A thin Claude skill that tells Claude when and how to call the CLI.
 - Shareable: README, MIT license, no personal paths or accounts in the repo; sites root configurable. Hosted in a public GitHub repo under the owner's personal account, never the owner's work account. Owner approved the design on 2026-11-19.
 
@@ -27,7 +27,7 @@ Success: one command per job, sites reachable at `https://<name>.test` with a tr
 
 - Deploying to live hosts. Not now.
 - Many simultaneous sites, Kubernetes, multi-user setups.
-- macOS/Linux support (keep paths portable where free, do not test).
+- Linux support (not a goal; may work by accident).
 - Replacing the migration plugin's push-back flow.
 
 ## Anti-goals (failure even if it "works")

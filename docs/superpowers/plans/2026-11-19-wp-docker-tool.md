@@ -6,18 +6,19 @@
 
 **Architecture:** One shared Traefik proxy + dnsmasq DNS container on network `wpd-net`; per-site Compose stack (WordPress, MariaDB, WP-CLI, Mailpit). `wpd.ps1` dispatches to small modules in `lib/`. Compose files are rendered from templates in `templates/`.
 
-**Tech Stack:** Windows PowerShell 5.1, Docker Desktop 29.x, Traefik, dnsmasq, mkcert, MariaDB, WP-CLI, Mailpit, Pester 5 for tests.
+**Tech Stack:** PowerShell 7 (`pwsh`, Windows and macOS), Docker Desktop 29.x, Traefik, dnsmasq, mkcert, MariaDB, WP-CLI, Mailpit, Pester 5 for tests.
 
 **Spec:** `docs/superpowers/specs/2026-11-19-wp-docker-tool-design.md`
 
 ## Global Constraints
 
-- Windows 11 first; Windows PowerShell 5.1 compatible (no `&&`, `?:`, `??`).
+- Runs on Windows 11 and macOS under PowerShell 7+ (`pwsh`). All OS-specific behavior lives in `lib/Platform.ps1`; no other file may branch on the OS or call Windows-only cmdlets. Use `Join-Path` and `$IsWindows`/`$IsMacOS`, never hard-coded separators.
+- macOS support is written to spec and not testable on the owner's machine; mark it "untested on macOS" in the README until a Mac user confirms.
 - Default TLD `.test`. Never `.local`.
-- Default sites root `D:\Development\Clients`; overridable (env `WPD_SITES_ROOT`, then `~\.wpd\config.json`). Nothing for sites on C:.
+- Sites root: env `WPD_SITES_ROOT`, then `~/.wpd/config.json`, then default `~/Sites`. `wpd setup` asks once and saves it. The owner's value is `D:\Development\Clients` (nothing for sites on C:); that value is never a code default.
 - Site files AND database data bind-mounted under `<SitesRoot>\<name>\`.
 - Ports 80/443 owned by Traefik; CLI reports the holder generically (no hard-coded Laragon). It may stop a recognized local server (Laragon, XAMPP, WAMP, IIS, nginx, Apache) only after an explicit interactive yes, records it in `~\.wpd\stopped.json`, and `wpd resume` restarts it. Never silent, never default, never for unrecognized processes.
-- DNS: dnsmasq answers `*.test` with `127.0.0.1`; Windows NRPT rule for namespace `.test` (one-time admin).
+- DNS: dnsmasq answers `*.test` with `127.0.0.1`. One-time OS hook: Windows NRPT rule for namespace `.test`; macOS `/etc/resolver/test` containing `nameserver 127.0.0.1` (sudo once). Both via `Register-TestDns`.
 - PHP limits baked in: `upload_max_filesize`/`post_max_size` 2G, `memory_limit` 512M, `max_execution_time` 600.
 - Generated WP config: `WP_HOME`/`WP_SITEURL` = local URL, `WP_ENVIRONMENT_TYPE=local`, `WP_DEBUG` on.
 - Clone safety: mail forced to Mailpit, `DISABLE_WP_CRON` true, risky plugins deactivated, search engines discouraged, URL search-replace via WP-CLI.
@@ -35,6 +36,7 @@
 ## File Structure
 
 - `wpd.ps1`: entry point, argument parsing, dispatch.
+- `lib/Platform.ps1`: the only OS-specific file. Produces: `Get-PortHolder([int]$Port,[ValidateSet('tcp','udp')][string]$Protocol) -> string` (Windows `Get-NetTCPConnection`/`Get-NetUDPEndpoint`, macOS `lsof`), `Register-TestDns() -> void`, `Test-TestDns() -> bool`, `Install-Mkcert() -> void` (winget / brew), `Get-DefaultSitesRoot() -> string`, `Get-KnownServers() -> object[]` (recognized local servers and how to stop/start them per OS). Tests mock these; Task 2 owns `Get-PortHolder` moving here.
 - `lib/Config.ps1`, `lib/Docker.ps1`, `lib/Infra.ps1`, `lib/Site.ps1`, `lib/Safety.ps1`, `lib/CloneSsh.ps1`, `lib/Wpress.ps1`, `lib/Doctor.ps1`: one responsibility each.
 - `templates/infra/docker-compose.yml`, `templates/infra/dnsmasq.conf`, `templates/site/docker-compose.yml.tpl`, `templates/site/php.ini`, `templates/risky-plugins.txt`.
 - `skill/SKILL.md`; `README.md`; `LICENSE`; `.gitignore`.
@@ -56,12 +58,12 @@
 
 ### Task 2: Skeleton, config, input validation
 
-**Files:** Create `wpd.ps1`, `lib/Config.ps1`, `lib/Docker.ps1`, `tests/Config.Tests.ps1`.
+**Files:** Create `wpd.ps1`, `lib/Config.ps1`, `lib/Docker.ps1`, `lib/Platform.ps1`, `tests/Config.Tests.ps1`.
 
 **Interfaces:**
-- Produces: `Get-WpdConfig -> hashtable @{SitesRoot; Tld; Network; InfraRoot}`; `Assert-SiteName([string]$Name) -> void` (throws); `Invoke-Docker([string[]]$Args) -> string[]` (throws on non-zero exit); `Assert-DockerRunning() -> void` (throws "start Docker Desktop"); `Get-PortHolder([int]$Port, [ValidateSet('tcp','udp')][string]$Protocol) -> string` (process name or `$null`).
+- Produces: `Get-WpdConfig -> hashtable @{SitesRoot; Tld; Network; InfraRoot}`; `Assert-SiteName([string]$Name) -> void` (throws); `Invoke-Docker([string[]]$Args) -> string[]` (throws on non-zero exit); `Assert-DockerRunning() -> void` (throws "start Docker Desktop"); `lib/Platform.ps1` functions listed in File Structure (`Get-PortHolder` returns the process name or `$null`; `Get-DefaultSitesRoot` returns `~/Sites`).
 
-- [ ] **Step 1:** Tests: default `SitesRoot` is `D:\Development\Clients`; env `WPD_SITES_ROOT` overrides it; `Assert-SiteName` accepts `acme`, `acme-2` and throws for `Acme`, `a b`, `a.b`, `..\x`, empty, 42-char name.
+- [ ] **Step 1:** Tests: default `SitesRoot` is `Get-DefaultSitesRoot` (`~/Sites`); env `WPD_SITES_ROOT` overrides it; `Assert-SiteName` accepts `acme`, `acme-2` and throws for `Acme`, `a b`, `a.b`, `..\x`, empty, 42-char name.
 - [ ] **Step 2:** Run `Invoke-Pester tests/Config.Tests.ps1`; expect FAIL.
 - [ ] **Step 3:** Implement per signatures; name pattern `^[a-z0-9]([a-z0-9-]{0,40}[a-z0-9])?$`. `wpd.ps1` dispatches `setup|doctor|resume|new|clone|up|down|list|rm|help` and prints usage for unknown input.
 - [ ] **Step 4:** Run tests; expect PASS. Commit `feat: skeleton, config, name validation`.
