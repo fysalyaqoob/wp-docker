@@ -1,0 +1,33 @@
+# Interpolated by `wpd setup` from environment variables; do not hard-code values here.
+services:
+  dns:
+    image: ${WPD_INFRA_PREFIX}-dns:local
+    container_name: ${WPD_INFRA_PREFIX}-dns
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${WPD_DNS_PORT}:53/udp"
+      - "127.0.0.1:${WPD_DNS_PORT}:53/tcp"
+  traefik:
+    image: traefik:v3.6
+    container_name: ${WPD_INFRA_PREFIX}-traefik
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${WPD_HTTP_PORT}:80"
+      - "127.0.0.1:${WPD_HTTPS_PORT}:443"
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=${WPD_NETWORK}
+      - --providers.file.directory=/dynamic
+      - --providers.file.watch=true
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+    volumes:
+      - ${WPD_INFRA_ROOT}/dynamic:/dynamic:ro
+      - ${WPD_INFRA_ROOT}/certs:/certs:ro
+      - ${WPD_DOCKER_SOCK}:/var/run/docker.sock:ro
+    networks: [wpd]
+networks:
+  wpd:
+    external: true
+    name: ${WPD_NETWORK}
