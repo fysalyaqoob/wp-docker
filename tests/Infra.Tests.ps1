@@ -120,38 +120,108 @@ Describe 'stop/resume safety (unit, everything mocked)' {
     }
 }
 
-Describe 'Get-ServerStopPlan on Windows (Get-CimInstance mocked)' -Skip:(-not $IsWindows) {
+Describe 'Get-ServerStopPlan on Windows (Get-CimInstance, Get-PortHolderPid mocked)' -Skip:(-not $IsWindows) {
+    BeforeAll {
+        function script:P($id, $parent, $path = 'C:\a\httpd.exe', $cl = '"C:\a\httpd.exe" -d x', $when = [datetime]'2026-01-01T10:00:00Z') {
+            [pscustomobject]@{ ProcessId = $id; ParentProcessId = $parent; ExecutablePath = $path; CommandLine = $cl; CreationDate = $when }
+        }
+    }
+    BeforeEach { Mock Get-PortHolderPid { 11 } }
     It 'quotes a path with spaces and an apostrophe and keeps the arguments' {
-        Mock Get-CimInstance { [pscustomobject]@{ ProcessId = 5; ParentProcessId = 1; ExecutablePath = "C:\Program Files\La'ragon\httpd.exe"
-            CommandLine = "`"C:\Program Files\La'ragon\httpd.exe`" -f `"C:\x y\httpd.conf`"" } }
-        $plan = Get-ServerStopPlan -Holder 'httpd'
+        $path = "C:\Program Files\La'ragon\httpd.exe"
+        Mock Get-CimInstance { P 11 1 $path "`"$path`" -f `"C:\x y\httpd.conf`"" }
+        $plan = Get-ServerStopPlan -Holder 'httpd' -Port 80
         $plan.Start | Should -Match ([regex]::Escape("-FilePath 'C:\Program Files\La''ragon\httpd.exe'"))
         $plan.Start | Should -Match ([regex]::Escape('-f "C:\x y\httpd.conf"'))
         { [scriptblock]::Create($plan.Start) } | Should -Not -Throw
     }
     It 'returns no plan when the executable path is unknown' {
-        Mock Get-CimInstance { [pscustomobject]@{ ProcessId = 5; ParentProcessId = 1; ExecutablePath = $null; CommandLine = $null } }
-        Get-ServerStopPlan -Holder 'httpd' | Should -BeNullOrEmpty
+        Mock Get-CimInstance { P 11 1 $null $null }
+        Get-ServerStopPlan -Holder 'httpd' -Port 80 | Should -BeNullOrEmpty
     }
-    It 'returns no plan when no process is found' {
+    It 'returns no plan when no process is found or the holder PID is unknown' {
         Mock Get-CimInstance { }
+        Get-ServerStopPlan -Holder 'httpd' -Port 80 | Should -BeNullOrEmpty
+        Mock Get-PortHolderPid { $null }
+        Mock Get-CimInstance { P 11 1 }
+        Get-ServerStopPlan -Holder 'httpd' -Port 80 | Should -BeNullOrEmpty
+    }
+    It 'returns no plan without a port (ambiguous)' {
+        Mock Get-CimInstance { P 11 1 }
         Get-ServerStopPlan -Holder 'httpd' | Should -BeNullOrEmpty
     }
     It 'returns no plan for an unrecognized holder' {
-        Get-ServerStopPlan -Holder 'mystery' | Should -BeNullOrEmpty
+        Get-ServerStopPlan -Holder 'mystery' -Port 80 | Should -BeNullOrEmpty
     }
-    It 'stops only the recorded PIDs and restarts only the root process' {
-        Mock Get-CimInstance {
-            [pscustomobject]@{ ProcessId = 10; ParentProcessId = 1; ExecutablePath = 'C:\a\httpd.exe'; CommandLine = '"C:\a\httpd.exe" -d x' }
-            [pscustomobject]@{ ProcessId = 11; ParentProcessId = 10; ExecutablePath = 'C:\a\httpd.exe'; CommandLine = '"C:\a\httpd.exe" -d x -child' }
-        }
-        $plan = Get-ServerStopPlan -Holder 'httpd'
-        $plan.Stop | Should -Match 'Stop-Process -Id 10,11 '
-        $plan.Stop | Should -Not -Match '-Name'
+    It 'records only the holder process tree, not an unrelated same-name instance' {
+        Mock Get-CimInstance { P 10 1; P 11 10 'C:\a\httpd.exe' '"C:\a\httpd.exe" -d x -child'; P 99 5 'C:\other\httpd.exe' '"C:\other\httpd.exe"' }
+        $plan = Get-ServerStopPlan -Holder 'httpd' -Port 80
+        $ids = @([regex]::Matches($plan.Stop, '"Pid":(\d+)') | ForEach-Object { [int]$_.Groups[1].Value })
+        $ids | Should -Be @(10, 11)
+        $plan.Stop | Should -Not -Match '99'
+    }
+    It 'returns no plan when a tree member is a different executable (ambiguous)' {
+        Mock Get-CimInstance { P 10 1; P 11 10 'C:\b\httpd.exe' }
+        Get-ServerStopPlan -Holder 'httpd' -Port 80 | Should -BeNullOrEmpty
+    }
+    It 'restarts all recorded PIDs with the single Start command of the root' {
+        Mock Get-CimInstance { P 10 1; P 11 10 'C:\a\httpd.exe' '"C:\a\httpd.exe" -d x -child' }
+        $plan = Get-ServerStopPlan -Holder 'httpd' -Port 80
         $plan.Start | Should -Not -Match 'child'
+        $plan.Start | Should -Match 'C:\\a\\httpd.exe'
+        $plan.Stop | Should -Match 'Stop-VerifiedProcesses'
     }
 }
 
+Describe 'Stop-VerifiedProcesses (Get-Process and Stop-Process mocked)' {
+    BeforeEach {
+        $script:recs = @(
+            [pscustomobject]@{ Pid = 10; StartTime = '2026-01-01T10:00:00.0000000Z'; Path = 'C:\a\httpd.exe' }
+            [pscustomobject]@{ Pid = 11; StartTime = '2026-01-01T10:00:01.0000000Z'; Path = 'C:\a\httpd.exe' })
+        Mock Stop-Process { }
+    }
+    It 'stops matching processes' {
+        Mock Get-Process { [pscustomobject]@{ Path = 'C:\a\httpd.exe'; StartTime = ([datetime]'2026-01-01T10:00:00Z').ToLocalTime() } } -ParameterFilter { $Id -eq 10 }
+        Mock Get-Process { [pscustomobject]@{ Path = 'C:\a\httpd.exe'; StartTime = ([datetime]'2026-01-01T10:00:01Z').ToLocalTime() } } -ParameterFilter { $Id -eq 11 }
+        Stop-VerifiedProcesses -Records $script:recs
+        Should -Invoke Stop-Process -Times 2
+    }
+    It 'a PID reused by a different executable stops nothing' {
+        Mock Get-Process { [pscustomobject]@{ Path = 'C:\a\httpd.exe'; StartTime = ([datetime]'2026-01-01T10:00:00Z').ToLocalTime() } } -ParameterFilter { $Id -eq 10 }
+        Mock Get-Process { [pscustomobject]@{ Path = 'C:\Windows\notepad.exe'; StartTime = ([datetime]'2026-01-01T10:00:01Z').ToLocalTime() } } -ParameterFilter { $Id -eq 11 }
+        { Stop-VerifiedProcesses -Records $script:recs } | Should -Throw '*PID reused*'
+        Should -Invoke Stop-Process -Times 0
+    }
+    It 'a PID reused by the same path but a different start time stops nothing' {
+        Mock Get-Process { [pscustomobject]@{ Path = 'C:\a\httpd.exe'; StartTime = ([datetime]'2026-02-02T10:00:00Z').ToLocalTime() } }
+        { Stop-VerifiedProcesses -Records $script:recs } | Should -Throw '*PID reused*'
+        Should -Invoke Stop-Process -Times 0
+    }
+    It 'a process that already exited is skipped without error' {
+        Mock Get-Process { }
+        { Stop-VerifiedProcesses -Records $script:recs } | Should -Not -Throw
+        Should -Invoke Stop-Process -Times 0
+    }
+}
+
+Describe 'corrupt stopped.json' {
+    BeforeEach {
+        $script:h = $env:WPD_HOME
+        $env:WPD_HOME = Join-Path ([IO.Path]::GetTempPath()) "wpd-test-$([guid]::NewGuid())"
+        New-Item -ItemType Directory $env:WPD_HOME | Out-Null
+        Mock Get-PortHolder { 'httpd' }
+        Mock Get-PortHolderPid { 1 }
+        Mock Get-ServerStopPlan { [pscustomobject]@{ Name = 'A'; Kind = 'process'; Stop = 's'; Start = 'r' } }
+    }
+    AfterEach { Remove-Item $env:WPD_HOME -Recurse -Force -ErrorAction SilentlyContinue; $env:WPD_HOME = $script:h }
+    It '<_> gives a clear error and Stop-PortConflicts stops nothing' -ForEach '', '{ not json' {
+        Set-Content (Join-Path $env:WPD_HOME 'stopped.json') -Value $_
+        $script:ran = 0
+        { Stop-PortConflicts -Ask { 'y' } -StopRunner { $script:ran++ } } | Should -Throw '*inspect it*delete it*'
+        $script:ran | Should -Be 0
+        { Resume-PortConflicts -StartRunner { } } | Should -Throw '*stopped.json*'
+    }
+}
 Describe 'Register-TestDns' {
     It 'does nothing when the rule already exists (no elevation)' {
         Mock Test-TestDns { $true }

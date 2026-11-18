@@ -44,6 +44,34 @@ function Get-KnownServers {
     }
 }
 
+function Get-PortHolderPid {
+    param([Parameter(Mandatory)][int]$Port, [ValidateSet('tcp', 'udp')][string]$Protocol = 'tcp')
+    if ($IsWindows) {
+        $c = if ($Protocol -eq 'tcp') { Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue }
+             else { Get-NetUDPEndpoint -LocalPort $Port -ErrorAction SilentlyContinue }
+        return ($c | Select-Object -First 1).OwningProcess
+    }
+    $spec = if ($Protocol -eq 'tcp') { @("-iTCP:$Port", '-sTCP:LISTEN') } else { @("-iUDP:$Port") }
+    $line = (& lsof -nP -F p @spec 2>$null) | Where-Object { $_ -like 'p*' } | Select-Object -First 1
+    if ($line) { [int]$line.Substring(1) } else { $null }
+}
+
+function Stop-VerifiedProcesses {
+    # Stops recorded processes only if each still matches its recorded start time and executable (guards PID reuse).
+    # Verifies ALL first and throws before stopping anything on a mismatch; a process already gone is fine.
+    param([Parameter(Mandatory)][object[]]$Records)
+    $live = @()
+    foreach ($r in $Records) {
+        $p = Get-Process -Id $r.Pid -ErrorAction SilentlyContinue
+        if (-not $p) { continue }
+        $recorded = [DateTime]::Parse($r.StartTime, $null, [Globalization.DateTimeStyles]::RoundtripKind)
+        $same = ($p.Path -eq $r.Path) -and ([math]::Abs(($p.StartTime.ToUniversalTime() - $recorded.ToUniversalTime()).TotalSeconds) -lt 2)
+        if (-not $same) { throw "Process $($r.Pid) is no longer the process wpd recorded (PID reused). Nothing was stopped; stop the server manually." }
+        $live += $r
+    }
+    foreach ($r in $live) { Stop-Process -Id $r.Pid -Force -ErrorAction SilentlyContinue }
+}
+
 function New-WindowsRestartCommand {
     # Builds a Start-Process command from a process's path and full command line (quote-safe for paths with spaces/apostrophes).
     param([Parameter(Mandatory)][string]$ExecutablePath, [string]$CommandLine)
@@ -57,7 +85,7 @@ function New-WindowsRestartCommand {
 
 function Get-ServerStopPlan {
     # Returns @{Name; Kind; Stop; Start} (PowerShell command strings) or $null if the holder is not recognized.
-    param([Parameter(Mandatory)][string]$Holder)
+    param([Parameter(Mandatory)][string]$Holder, [int]$Port)
     $s = Get-KnownServers | Where-Object { $_.Process -contains $Holder } | Select-Object -First 1
     if (-not $s) { return $null }
     if ($IsWindows) {
@@ -67,16 +95,34 @@ function Get-ServerStopPlan {
             return [pscustomobject]@{ Name = $s.Name; Kind = 'service'
                 Stop = "Stop-Service -Name '$($s.Service)' -Force"; Start = "Start-Service -Name '$($s.Service)'" }
         }
+        # Without the PID that actually holds the port the plan would be ambiguous: offer nothing.
+        if (-not $Port) { return $null }
+        $holderPid = Get-PortHolderPid -Port $Port -Protocol tcp
+        if (-not $holderPid) { return $null }
         $procs = @(Get-CimInstance Win32_Process -Filter "Name='$Holder.exe'" -ErrorAction SilentlyContinue)
-        if (-not $procs) { return $null }
-        # Restart only the root process (the one whose parent is not another httpd worker).
-        $ids = $procs.ProcessId
-        $root = $procs | Where-Object { $ids -notcontains $_.ParentProcessId } | Select-Object -First 1
-        if (-not $root) { $root = $procs[0] }
-        # No known executable path means we could not restart it: offer no stop at all.
-        if (-not $root.ExecutablePath) { return $null }
+        $hp = $procs | Where-Object { $_.ProcessId -eq $holderPid } | Select-Object -First 1
+        if (-not $hp -or -not $hp.ExecutablePath) { return $null }
+        # Only the process tree holding the port (connected via parent/child links among same-name processes).
+        # Unrelated same-name instances are left alone.
+        $tree = [System.Collections.Generic.HashSet[int]]::new(); [void]$tree.Add([int]$hp.ProcessId)
+        do {
+            $before = $tree.Count
+            foreach ($p in $procs) {
+                $parentIn = $tree.Contains([int]$p.ParentProcessId)
+                $childIn = @($procs | Where-Object { $tree.Contains([int]$_.ProcessId) -and [int]$_.ParentProcessId -eq [int]$p.ProcessId }).Count -gt 0
+                if ($parentIn -or $childIn) { [void]$tree.Add([int]$p.ProcessId) }
+            }
+        } while ($tree.Count -ne $before)
+        $members = @($procs | Where-Object { $tree.Contains([int]$_.ProcessId) })
+        # Every member must be the same executable with a known start time, or the plan is ambiguous.
+        if (@($members | Where-Object { $_.ExecutablePath -ne $hp.ExecutablePath -or -not $_.CreationDate }).Count) { return $null }
+        $root = $members | Where-Object { -not $tree.Contains([int]$_.ParentProcessId) } | Select-Object -First 1
+        if (-not $root) { return $null }
+        $recs = @($members | ForEach-Object {
+            [pscustomobject]@{ Pid = [int]$_.ProcessId; StartTime = $_.CreationDate.ToUniversalTime().ToString('o'); Path = $_.ExecutablePath } })
+        $json = (ConvertTo-Json -InputObject $recs -Compress) -replace "'", "''"
         return [pscustomobject]@{ Name = $s.Name; Kind = 'process'
-            Stop = "Stop-Process -Id $($ids -join ',') -Force -ErrorAction SilentlyContinue"
+            Stop = "Stop-VerifiedProcesses -Records (ConvertFrom-Json '$json')"
             Start = New-WindowsRestartCommand -ExecutablePath $root.ExecutablePath -CommandLine $root.CommandLine }
     }
     if ($s.Service -eq 'apachectl') {

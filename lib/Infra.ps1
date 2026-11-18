@@ -15,7 +15,7 @@ function Get-PortFix {
     # Explains how to resolve a port held by $Holder. $Role is 'web' (80/443) or 'dns' (53).
     param([int]$Port, [string]$Holder, [string]$Role)
     if ($Role -eq 'web' -and (Get-KnownServers | Where-Object { $_.Process -contains $Holder })) {
-        if (Get-ServerStopPlan -Holder $Holder) {
+        if (Get-ServerStopPlan -Holder $Holder -Port $Port) {
             return "$Holder is using port $Port. Run 'wpd setup': it will offer to stop $Holder (you confirm), and 'wpd resume' starts it again."
         }
         return "$Holder is using port $Port, but wpd cannot safely stop and restart it here. Stop $Holder manually, then re-run 'wpd setup'."
@@ -28,7 +28,14 @@ function Get-PortFix {
 
 function Read-StoppedRecords {
     $file = Get-StoppedFile
-    if (Test-Path $file) { @(Get-Content $file -Raw | ConvertFrom-Json) } else { @() }
+    if (-not (Test-Path $file)) { return @() }
+    try {
+        $raw = Get-Content $file -Raw
+        if (-not $raw -or -not $raw.Trim()) { throw 'file is empty' }
+        @($raw | ConvertFrom-Json -ErrorAction Stop)
+    } catch {
+        throw "Cannot read $file ($($_.Exception.Message)). It records servers wpd stopped. Inspect it (restart those servers yourself if needed) or delete it, then try again."
+    }
 }
 
 function Write-StoppedRecords {
@@ -50,11 +57,12 @@ function Stop-PortConflicts {
     )
     $c = Get-WpdConfig
     $seen = @{}
+    [void](Read-StoppedRecords)   # fail early on a corrupt state file, before any stop
     foreach ($port in $c.HttpPort, $c.HttpsPort) {
         $holder = Get-PortHolder -Port $port -Protocol tcp
         if (-not $holder -or (Test-OwnHolder $holder) -or $seen[$holder]) { continue }
         $seen[$holder] = $true
-        $plan = Get-ServerStopPlan -Holder $holder
+        $plan = Get-ServerStopPlan -Holder $holder -Port $port
         if (-not $plan) { Write-Warning (Get-PortFix -Port $port -Holder $holder -Role web); continue }
         $answer = & $Ask "Port $port is held by '$holder' ($($plan.Name)). Stop it so Traefik can use it? 'wpd resume' restarts it. [y/N]"
         if ($answer -notmatch '^\s*(y|yes)\s*$') { Write-Host "Leaving $holder running."; continue }
