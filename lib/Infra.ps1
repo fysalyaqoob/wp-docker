@@ -15,7 +15,10 @@ function Get-PortFix {
     # Explains how to resolve a port held by $Holder. $Role is 'web' (80/443) or 'dns' (53).
     param([int]$Port, [string]$Holder, [string]$Role)
     if ($Role -eq 'web' -and (Get-KnownServers | Where-Object { $_.Process -contains $Holder })) {
-        return "$Holder is using port $Port. Run 'wpd setup': it will offer to stop $Holder (you confirm), and 'wpd resume' starts it again."
+        if (Get-ServerStopPlan -Holder $Holder) {
+            return "$Holder is using port $Port. Run 'wpd setup': it will offer to stop $Holder (you confirm), and 'wpd resume' starts it again."
+        }
+        return "$Holder is using port $Port, but wpd cannot safely stop and restart it here. Stop $Holder manually, then re-run 'wpd setup'."
     }
     if ($Role -eq 'dns' -and $Holder -eq 'svchost') {
         return "A Windows service (svchost) is using port $Port, usually Internet Connection Sharing. Disable Internet Connection Sharing (service SharedAccess) or free the port, then re-run 'wpd setup'."
@@ -23,8 +26,22 @@ function Get-PortFix {
     "'$Holder' is using port $Port and wpd does not recognize it, so it will not stop it. Stop it yourself or free the port, then re-run 'wpd setup'."
 }
 
+function Read-StoppedRecords {
+    $file = Get-StoppedFile
+    if (Test-Path $file) { @(Get-Content $file -Raw | ConvertFrom-Json) } else { @() }
+}
+
+function Write-StoppedRecords {
+    param([object[]]$Records)
+    $file = Get-StoppedFile
+    if (-not $Records) { if (Test-Path $file) { Remove-Item $file -ErrorAction Stop }; return }
+    New-Item -ItemType Directory (Split-Path $file) -Force -ErrorAction Stop | Out-Null
+    ConvertTo-Json -InputObject @($Records) | Set-Content $file -ErrorAction Stop
+}
+
 function Stop-PortConflicts {
     # Asks per recognized server; stops only on an explicit yes. Unrecognized holders are never touched.
+    # The restart record is persisted BEFORE each stop, so a stopped server is never unrecorded.
     # -Confirm is accepted for the documented contract; asking is always on.
     param(
         [switch]$Confirm,
@@ -33,7 +50,6 @@ function Stop-PortConflicts {
     )
     $c = Get-WpdConfig
     $seen = @{}
-    $stopped = @()
     foreach ($port in $c.HttpPort, $c.HttpsPort) {
         $holder = Get-PortHolder -Port $port -Protocol tcp
         if (-not $holder -or (Test-OwnHolder $holder) -or $seen[$holder]) { continue }
@@ -42,29 +58,48 @@ function Stop-PortConflicts {
         if (-not $plan) { Write-Warning (Get-PortFix -Port $port -Holder $holder -Role web); continue }
         $answer = & $Ask "Port $port is held by '$holder' ($($plan.Name)). Stop it so Traefik can use it? 'wpd resume' restarts it. [y/N]"
         if ($answer -notmatch '^\s*(y|yes)\s*$') { Write-Host "Leaving $holder running."; continue }
-        & $StopRunner $plan.Stop
+        $before = @(Read-StoppedRecords)
+        $entry = [pscustomobject]@{ Name = $plan.Name; Kind = $plan.Kind; Stop = $plan.Stop; Start = $plan.Start }
+        try { Write-StoppedRecords ($before + $entry) }
+        catch { throw "Cannot write $(Get-StoppedFile), so $holder was NOT stopped: $($_.Exception.Message)" }
+        try { & $StopRunner $plan.Stop }
+        catch {
+            try { Write-StoppedRecords $before } catch { }
+            throw "Could not stop $($plan.Name): $($_.Exception.Message)"
+        }
         Write-Host "Stopped $($plan.Name)."
-        $stopped += [pscustomobject]@{ Name = $plan.Name; Kind = $plan.Kind; Stop = $plan.Stop; Start = $plan.Start }
-    }
-    if ($stopped) {
-        $file = Get-StoppedFile
-        $all = @()
-        if (Test-Path $file) { $all += @(Get-Content $file -Raw | ConvertFrom-Json) }
-        New-Item -ItemType Directory (Split-Path $file) -Force | Out-Null
-        ConvertTo-Json -InputObject @($all + $stopped) | Set-Content $file
     }
 }
 
 function Resume-PortConflicts {
     param([scriptblock]$StartRunner = { param($cmd) Invoke-ServerCommand $cmd })
-    $file = Get-StoppedFile
-    if (-not (Test-Path $file)) { Write-Host 'Nothing to resume: wpd has not stopped any server.'; return }
+    $records = @(Read-StoppedRecords)
+    if (-not (Test-Path (Get-StoppedFile))) { Write-Host 'Nothing to resume: wpd has not stopped any server.'; return }
     $failed = @()
-    foreach ($s in @(Get-Content $file -Raw | ConvertFrom-Json)) {
+    foreach ($s in $records) {
+        if (-not $s.Start -or -not "$($s.Start)".Trim()) {
+            Write-Warning "No restart command was recorded for $($s.Name). Start it manually."; $failed += $s; continue
+        }
         try { & $StartRunner $s.Start; Write-Host "Restarted $($s.Name)." }
         catch { Write-Warning "Could not restart $($s.Name): $($_.Exception.Message). Start it manually."; $failed += $s }
     }
-    if ($failed) { ConvertTo-Json -InputObject @($failed) | Set-Content $file } else { Remove-Item $file }
+    Write-StoppedRecords $failed
+}
+
+function Wait-PortsFree {
+    # After Stop-PortConflicts: wait briefly for 80/443 to free, then throw the fix text for whatever still holds them.
+    param([int]$TimeoutSeconds = 5)
+    $c = Get-WpdConfig
+    for ($i = 0; $i -le $TimeoutSeconds * 2; $i++) {
+        $busy = @()
+        foreach ($port in $c.HttpPort, $c.HttpsPort) {
+            $h = Get-PortHolder -Port $port -Protocol tcp
+            if ($h -and -not (Test-OwnHolder $h)) { $busy += [pscustomobject]@{ Port = $port; Holder = $h } }
+        }
+        if (-not $busy) { return }
+        if ($i -lt $TimeoutSeconds * 2) { Start-Sleep -Milliseconds 500 }
+    }
+    throw (($busy | ForEach-Object { Get-PortFix -Port $_.Port -Holder $_.Holder -Role web }) -join "`n")
 }
 
 function Invoke-DockerRetry {
@@ -94,6 +129,7 @@ function Initialize-Infra {
     Confirm-SitesRoot
     $c = Get-WpdConfig
     Stop-PortConflicts
+    Wait-PortsFree
     $dnsHolder = Get-PortHolder -Port $c.DnsPort -Protocol udp
     if ($dnsHolder -and -not (Test-OwnHolder $dnsHolder)) { throw (Get-PortFix -Port $c.DnsPort -Holder $dnsHolder -Role dns) }
 
@@ -111,11 +147,17 @@ function Initialize-Infra {
     Invoke-DockerRetry @('pull', 'traefik:v3.6') | Out-Null
     Invoke-Docker @('build', '-q', '-t', "$($c.InfraPrefix)-dns:local", '-f', (Join-Path $c.InfraRoot 'Dockerfile.dns'), $c.InfraRoot) | Out-Null
 
-    $env:WPD_INFRA_PREFIX = $c.InfraPrefix; $env:WPD_NETWORK = $c.Network
-    $env:WPD_HTTP_PORT = "$($c.HttpPort)"; $env:WPD_HTTPS_PORT = "$($c.HttpsPort)"; $env:WPD_DNS_PORT = "$($c.DnsPort)"
-    $env:WPD_INFRA_ROOT = $c.InfraRoot -replace '\\', '/'
-    $env:WPD_DOCKER_SOCK = Get-DockerSocketPath
-    Invoke-Docker @('compose', '-p', $c.InfraPrefix, '-f', (Join-Path $c.InfraRoot 'docker-compose.yml'), 'up', '-d') | Out-Null
+    $names = 'WPD_INFRA_PREFIX', 'WPD_NETWORK', 'WPD_HTTP_PORT', 'WPD_HTTPS_PORT', 'WPD_DNS_PORT', 'WPD_INFRA_ROOT', 'WPD_DOCKER_SOCK'
+    $old = @{}; foreach ($n in $names) { $old[$n] = [Environment]::GetEnvironmentVariable($n) }
+    try {
+        $env:WPD_INFRA_PREFIX = $c.InfraPrefix; $env:WPD_NETWORK = $c.Network
+        $env:WPD_HTTP_PORT = "$($c.HttpPort)"; $env:WPD_HTTPS_PORT = "$($c.HttpsPort)"; $env:WPD_DNS_PORT = "$($c.DnsPort)"
+        $env:WPD_INFRA_ROOT = $c.InfraRoot -replace '\\', '/'
+        $env:WPD_DOCKER_SOCK = Get-DockerSocketPath
+        Invoke-Docker @('compose', '-p', $c.InfraPrefix, '-f', (Join-Path $c.InfraRoot 'docker-compose.yml'), 'up', '-d') | Out-Null
+    } finally {
+        foreach ($n in $names) { [Environment]::SetEnvironmentVariable($n, $old[$n]) }
+    }
 
     Register-TestDns
     Write-Host "Infra ready: Traefik on $($c.HttpPort)/$($c.HttpsPort), DNS on $($c.DnsPort), network $($c.Network)."

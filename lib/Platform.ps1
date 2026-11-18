@@ -44,6 +44,17 @@ function Get-KnownServers {
     }
 }
 
+function New-WindowsRestartCommand {
+    # Builds a Start-Process command from a process's path and full command line (quote-safe for paths with spaces/apostrophes).
+    param([Parameter(Mandatory)][string]$ExecutablePath, [string]$CommandLine)
+    $q = { param($t) $t -replace "'", "''" }
+    $exe = & $q $ExecutablePath
+    $wd = & $q (Split-Path $ExecutablePath)
+    $procArgs = if ($CommandLine) { $CommandLine -replace '^\s*("[^"]*"|\S+)\s*', '' } else { '' }
+    if ($procArgs) { "Start-Process -FilePath '$exe' -ArgumentList '$(& $q $procArgs)' -WorkingDirectory '$wd' -WindowStyle Hidden" }
+    else { "Start-Process -FilePath '$exe' -WorkingDirectory '$wd' -WindowStyle Hidden" }
+}
+
 function Get-ServerStopPlan {
     # Returns @{Name; Kind; Stop; Start} (PowerShell command strings) or $null if the holder is not recognized.
     param([Parameter(Mandatory)][string]$Holder)
@@ -56,16 +67,17 @@ function Get-ServerStopPlan {
             return [pscustomobject]@{ Name = $s.Name; Kind = 'service'
                 Stop = "Stop-Service -Name '$($s.Service)' -Force"; Start = "Start-Service -Name '$($s.Service)'" }
         }
-        $p = Get-CimInstance Win32_Process -Filter "Name='$Holder.exe'" -ErrorAction SilentlyContinue | Select-Object -First 1
-        $start = if ($p -and $p.ExecutablePath) {
-            $procArgs = ($p.CommandLine -replace '^\s*("[^"]*"|\S+)\s*', '') -replace "'", "''"
-            $exe = $p.ExecutablePath -replace "'", "''"
-            $wd = (Split-Path $p.ExecutablePath) -replace "'", "''"
-            if ($procArgs) { "Start-Process -FilePath '$exe' -ArgumentList '$procArgs' -WorkingDirectory '$wd' -WindowStyle Hidden" }
-            else { "Start-Process -FilePath '$exe' -WorkingDirectory '$wd' -WindowStyle Hidden" }
-        } else { "Write-Warning 'wpd could not record how to restart $Holder. Start it manually.'" }
+        $procs = @(Get-CimInstance Win32_Process -Filter "Name='$Holder.exe'" -ErrorAction SilentlyContinue)
+        if (-not $procs) { return $null }
+        # Restart only the root process (the one whose parent is not another httpd worker).
+        $ids = $procs.ProcessId
+        $root = $procs | Where-Object { $ids -notcontains $_.ParentProcessId } | Select-Object -First 1
+        if (-not $root) { $root = $procs[0] }
+        # No known executable path means we could not restart it: offer no stop at all.
+        if (-not $root.ExecutablePath) { return $null }
         return [pscustomobject]@{ Name = $s.Name; Kind = 'process'
-            Stop = "Get-Process -Name '$Holder' -ErrorAction SilentlyContinue | Stop-Process -Force"; Start = $start }
+            Stop = "Stop-Process -Id $($ids -join ',') -Force -ErrorAction SilentlyContinue"
+            Start = New-WindowsRestartCommand -ExecutablePath $root.ExecutablePath -CommandLine $root.CommandLine }
     }
     if ($s.Service -eq 'apachectl') {
         return [pscustomobject]@{ Name = $s.Name; Kind = 'service'; Stop = 'sudo apachectl stop'; Start = 'sudo apachectl start' }
