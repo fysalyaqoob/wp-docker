@@ -16,7 +16,7 @@
 - Default TLD `.test`. Never `.local`.
 - Default sites root `D:\Development\Clients`; overridable (env `WPD_SITES_ROOT`, then `~\.wpd\config.json`). Nothing for sites on C:.
 - Site files AND database data bind-mounted under `<SitesRoot>\<name>\`.
-- Ports 80/443 owned by Traefik; CLI reports the holder (e.g. Laragon `httpd`) and never kills it.
+- Ports 80/443 owned by Traefik; CLI reports the holder generically (no hard-coded Laragon). It may stop a recognized local server (Laragon, XAMPP, WAMP, IIS, nginx, Apache) only after an explicit interactive yes, records it in `~\.wpd\stopped.json`, and `wpd resume` restarts it. Never silent, never default, never for unrecognized processes.
 - DNS: dnsmasq answers `*.test` with `127.0.0.1`; Windows NRPT rule for namespace `.test` (one-time admin).
 - PHP limits baked in: `upload_max_filesize`/`post_max_size` 2G, `memory_limit` 512M, `max_execution_time` 600.
 - Generated WP config: `WP_HOME`/`WP_SITEURL` = local URL, `WP_ENVIRONMENT_TYPE=local`, `WP_DEBUG` on.
@@ -48,7 +48,7 @@
 
 **Interfaces:** Produces: written answers the later tasks rely on.
 
-- [ ] **Step 1:** Stop Laragon; disable ICS (`Stop-Service SharedAccess; Set-Service SharedAccess -StartupType Disabled`, admin) with the owner's go-ahead; confirm `Get-NetUDPEndpoint -LocalPort 53` is empty.
+- [ ] **Step 1:** First try the non-destructive route: bind a test DNS container to `127.0.0.1:53` with ICS and the existing web server untouched, and test Traefik on alternate ports (8080/8443) so nothing needs stopping. Only if port 53 truly cannot bind, ask the owner for an explicit yes before disabling ICS (`Stop-Service SharedAccess; Set-Service SharedAccess -StartupType Disabled`, admin) and before stopping any web server on 80/443. Record exactly what was changed so it can be undone.
 - [ ] **Step 2:** Run dnsmasq in Docker publishing `127.0.0.1:53`; add NRPT rule `Add-DnsClientNrptRule -Namespace ".test" -NameServers 127.0.0.1`; verify `Resolve-DnsName anything.test` returns `127.0.0.1`. Record whether it works and the exact steps.
 - [ ] **Step 3:** `winget install FiloSottile.mkcert`; `mkcert -install`; `mkcert "*.test"`; serve a test page through Traefik with it; verify `curl https://hello.test` gives 200 without `-k`.
 - [ ] **Step 4:** Take one real `.wpress` from the owner's sites; record the archive header layout actually seen (expected: 4377-byte header = name 255, size 14, mtime 12, path 4096, ends with an all-zero block), and how table names appear in `database.sql` (expected prefix token `SERVMASK_PREFIX_`). Record bind-mount page-load time from D: for a stock WordPress.
@@ -63,7 +63,7 @@
 
 - [ ] **Step 1:** Tests: default `SitesRoot` is `D:\Development\Clients`; env `WPD_SITES_ROOT` overrides it; `Assert-SiteName` accepts `acme`, `acme-2` and throws for `Acme`, `a b`, `a.b`, `..\x`, empty, 42-char name.
 - [ ] **Step 2:** Run `Invoke-Pester tests/Config.Tests.ps1`; expect FAIL.
-- [ ] **Step 3:** Implement per signatures; name pattern `^[a-z0-9]([a-z0-9-]{0,40}[a-z0-9])?$`. `wpd.ps1` dispatches `setup|doctor|new|clone|up|down|list|rm|help` and prints usage for unknown input.
+- [ ] **Step 3:** Implement per signatures; name pattern `^[a-z0-9]([a-z0-9-]{0,40}[a-z0-9])?$`. `wpd.ps1` dispatches `setup|doctor|resume|new|clone|up|down|list|rm|help` and prints usage for unknown input.
 - [ ] **Step 4:** Run tests; expect PASS. Commit `feat: skeleton, config, name validation`.
 
 ### Task 3: `wpd setup` and `wpd doctor`
@@ -72,9 +72,9 @@
 
 **Interfaces:**
 - Consumes: Task 2 `Get-WpdConfig`, `Invoke-Docker`, `Get-PortHolder`.
-- Produces: `Initialize-Infra() -> void` (idempotent: network, mkcert wildcard cert, dnsmasq, Traefik, NRPT rule); `Test-Infra() -> [pscustomobject[]]` each `@{Name; Ok; Fix}`, checks: Docker running, ports 80/443 holder, port 53 holder, mkcert installed and CA trusted, NRPT rule present, `wpd-net` exists, Traefik and DNS containers up.
+- Produces: `Stop-PortConflicts([switch]$Confirm) -> void` (asks per recognized server, stops only on yes, writes `~\.wpd\stopped.json` with name, kind (service or process), and restart command); `Resume-PortConflicts() -> void` (restarts what the file lists, reports each, clears the file; no-op with a message if the file is absent); `Initialize-Infra() -> void` (idempotent: network, mkcert wildcard cert, dnsmasq, Traefik, NRPT rule); `Test-Infra() -> [pscustomobject[]]` each `@{Name; Ok; Fix}`, checks: Docker running, ports 80/443 holder, port 53 holder, mkcert installed and CA trusted, NRPT rule present, `wpd-net` exists, Traefik and DNS containers up.
 
-- [ ] **Step 1:** Unit test `Test-Infra` with mocked `Get-PortHolder` returning `httpd`: result contains a failing item whose `Fix` names `httpd` and says to stop it. Mock holder `svchost` on 53: `Fix` mentions Internet Connection Sharing. Integration test (tag): after `Initialize-Infra` twice, `Test-Infra` all `Ok`.
+- [ ] **Step 1:** Unit tests: `Stop-PortConflicts` with a mocked holder `httpd` and a "no" answer stops nothing and writes no state; with "yes" it stops it and the state file lists it; `Resume-PortConflicts` restarts exactly what the state file lists and clears it; an unrecognized holder is never stopped. Unit test `Test-Infra` with mocked `Get-PortHolder` returning `httpd`: result contains a failing item whose `Fix` names `httpd` and mentions `wpd setup` offering to stop it. Mock holder `svchost` on 53: `Fix` mentions Internet Connection Sharing. Integration test (tag): after `Initialize-Infra` twice, `Test-Infra` all `Ok`.
 - [ ] **Step 2:** Run; expect FAIL.
 - [ ] **Step 3:** Implement using the exact commands proven in Task 1. NRPT step self-elevates once and says why.
 - [ ] **Step 4:** Run unit tests, then integration; expect PASS. Commit `feat: setup and doctor`.

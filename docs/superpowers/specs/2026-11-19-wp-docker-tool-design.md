@@ -79,7 +79,7 @@ Sites root is `D:\Development\Clients` (owner's decision: nothing for sites on C
 
 ### Commands
 
-- `wpd setup`, `wpd doctor`
+- `wpd setup`, `wpd doctor`, `wpd resume` (restart servers `setup` stopped, with the user's yes)
 - `wpd new <name> [--php 8.3]`: create stack, install WordPress with generated admin credentials, print URL and login.
 - `wpd clone <name> --ssh user@host --path /remote/wp` : pull files (rsync/scp) and DB dump, import, search-replace live URL to local URL.
 - `wpd clone <name> --wpress <file>`: create a blank site, unpack the `.wpress` file directly (no plugin, no license), restore files and database, fix URLs.
@@ -93,7 +93,7 @@ After any clone: run search-replace live to local URL (including serialized data
 ## Risks and fallbacks (to resolve first in the plan)
 
 1. **Port 53 blocked by ICS.** Owner does not use ICS and approved disabling it. Spike first: try binding the DNS container to `127.0.0.1:53` or an alias loopback address. If that fails, `wpd setup` (or `wpd doctor`) tells the owner to disable the ICS service (`SharedAccess`) and retries. No hosts-file fallback needed unless ICS is disabled and port 53 is still unusable; then stop and ask the owner.
-2. **Laragon on 80/443.** CLI refuses to start the proxy while another process holds them and names the process.
+2. **Another local server on 80/443 (Laragon here; XAMPP, IIS, nginx for other people).** Owner decision (2026-11-19): the tool must stay generic because it will be shared, and any stopping must notify the user and be resumable. So: `wpd setup`/`doctor` detect whatever process holds 80/443 and name it. For recognized servers (a small list: Laragon, XAMPP, WAMP, IIS, nginx, Apache) the CLI offers, interactively and only after an explicit yes, to stop them, and records exactly what it stopped in `~\.wpd\stopped.json`. `wpd resume` restarts those and tells the user what it did. Nothing is ever stopped silently or by default; unrecognized holders are only reported.
 3. **`.wpress` import without the Unlimited extension.** Owner has no Unlimited extension license, so the plugin's WP-CLI import and big-file import are unavailable. Decision (assistant's call): `wpd clone --wpress` does not drive the plugin at all. It unpacks the `.wpress` archive itself (a simple sequential file format) into the site folder, restores `database.sql` through WP-CLI/MariaDB, runs the URL search-replace, and applies the clone safety defaults. Spike verifies this on a real `.wpress` from one of the owner's sites. Manual browser import is the documented fallback only.
 4. **mkcert CA** on Windows needs a one-time trust prompt.
 
