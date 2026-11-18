@@ -1,0 +1,4 @@
+.wpd-credentials.txt
+*.pem
+*.wpress
+.claude/
