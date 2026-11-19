@@ -1,7 +1,7 @@
 #!/usr/bin/env pwsh
 param([Parameter(Position = 0)][string]$Command = 'help', [Parameter(ValueFromRemainingArguments)][string[]]$Rest)
 $ErrorActionPreference = 'Stop'
-foreach ($f in 'Platform', 'Config', 'Docker', 'Infra', 'Doctor', 'Site', 'Safety') { . (Join-Path $PSScriptRoot "lib/$f.ps1") }
+foreach ($f in 'Platform', 'Config', 'Docker', 'Infra', 'Doctor', 'Site', 'Safety', 'CloneSsh') { . (Join-Path $PSScriptRoot "lib/$f.ps1") }
 
 $usage = @'
 Usage: wpd <command> [args]
@@ -10,6 +10,9 @@ Usage: wpd <command> [args]
   up|down <name>           start / stop a site (data is kept)
   list                     show sites and whether they run
   rm <name> [--force]      delete a site (asks first unless --force)
+  clone <name> --ssh <user@host|alias> --path </remote/wordpress/folder> [--no-uploads]
+                           clone a live site over SSH (key or agent login, remote WP-CLI needed; untested against a real server)
+  clone <name> --wpress <file>   not implemented yet
   clone: live URL replacement is a plain text replace, so https://live.com also rewrites inside https://live.com.au
 '@
 
@@ -25,6 +28,27 @@ function Read-SiteArgs {
             '^-' { throw "Unknown option '$($Tokens[$i])'." }
             default { if ($r.Name) { throw "Unexpected argument '$($Tokens[$i])'." }; $r.Name = $Tokens[$i] }
         }
+    }
+    $r
+}
+
+function Read-CloneArgs {
+    # Returns @{ Name; Ssh; Path; Wpress; NoUploads } from "<name> --ssh <target> --path <dir> [--no-uploads] | --wpress <file>".
+    param([string[]]$Tokens)
+    $r = @{ Name = $null; Ssh = $null; Path = $null; Wpress = $null; NoUploads = $false }
+    $Tokens = @($Tokens | Where-Object { $_ })
+    for ($i = 0; $i -lt $Tokens.Count; $i++) {
+        $t = $Tokens[$i]
+        if ($t -match '^--?(ssh|path|wpress)$') {
+            $i++
+            if ($i -ge $Tokens.Count) { throw "$t needs a value." }
+            $key = (Get-Culture).TextInfo.ToTitleCase($Matches[1])
+            $r[$key] = $Tokens[$i]
+        }
+        elseif ($t -match '^--?no-uploads$') { $r.NoUploads = $true }
+        elseif ($t.StartsWith('-')) { throw "Unknown option '$t'." }
+        elseif ($r.Name) { throw "Unexpected argument '$t'." }
+        else { $r.Name = $t }
     }
     $r
 }
@@ -60,7 +84,16 @@ switch ($Command) {
         $p = Read-SiteArgs $Rest
         Remove-WpdSite (Get-RequiredName $p 'rm') -Force:$p.Force
     }
-    'clone' { Write-Host "'clone' is not implemented yet."; exit 1 }
+    'clone' {
+        $p = Read-CloneArgs $Rest
+        if ($p.Wpress) { Write-Host "'clone --wpress' is not implemented yet."; exit 1 }
+        if (-not $p.Name -or -not $p.Ssh -or -not $p.Path) { throw 'Usage: wpd clone <name> --ssh <user@host> --path </remote/wordpress/folder> [--no-uploads]' }
+        $s = Import-LiveSite -Name $p.Name -Target $p.Ssh -RemotePath $p.Path -NoUploads:$p.NoUploads
+        Write-Host ''
+        Write-Host "Clone ready: $($s.Url)"
+        Write-Host "Admin login: $($s.AdminUser) / $($s.AdminPassword)"
+        Write-Host "Folder: $($s.Path) (credentials in .wpd-credentials.txt)"
+    }
     'help' { Write-Host $usage }
     default { Write-Host "Unknown command '$Command'."; Write-Host $usage; exit 1 }
 }
