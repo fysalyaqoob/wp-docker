@@ -28,7 +28,7 @@ Optional: make `wpd` shorter to type. PowerShell profile: `function wpd { pwsh /
 
 ## One-time `wpd setup`
 
-It asks before changing anything that matters. What it does:
+It asks before stopping any local web server or disabling anything. It installs mkcert (via winget or brew) without a separate prompt, and adds the `.test` DNS hook (admin or sudo once). What it does:
 
 - Asks where site folders live (sites root) and saves it.
 - Installs mkcert if needed and trusts its local CA (`mkcert -install`) so browsers accept `https://*.test`.

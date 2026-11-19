@@ -4,7 +4,7 @@ Date: 2026-11-19. Status: draft for approval.
 
 ## Intent and why
 
-The owner builds and tests WordPress sites for clients (agency work). They want Docker to replace every other local server (currently Laragon, whose Apache holds ports 80/443 on their machine). Two jobs:
+The owner builds and tests WordPress sites for clients. They want Docker to replace every other local server (for example Laragon, whose Apache holds ports 80/443). Two jobs:
 
 1. **New site**: blank WordPress, built locally, deployed to live later.
 2. **Clone live site**: pull an existing live site down (files + database) to develop and test safely.
