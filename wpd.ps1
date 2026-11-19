@@ -25,8 +25,8 @@ function Read-SiteArgs {
     $Tokens = @($Tokens | Where-Object { $_ })
     for ($i = 0; $i -lt $Tokens.Count; $i++) {
         switch -Regex ($Tokens[$i]) {
-            '^--?php$' { $i++; if ($i -ge $Tokens.Count) { throw '--php needs a version, for example --php 8.3.' }; $r.Php = $Tokens[$i] }
-            '^--?force$' { $r.Force = $true }
+            '^--?php$' { $i++; if ($i -ge $Tokens.Count) { throw '--php needs a version, for example --php 8.3.' }; $r.Php = $Tokens[$i]; break }
+            '^--?force$' { $r.Force = $true; break }
             '^-' { throw "Unknown option '$($Tokens[$i])'." }
             default { if ($r.Name) { throw "Unexpected argument '$($Tokens[$i])'." }; $r.Name = $Tokens[$i] }
         }
