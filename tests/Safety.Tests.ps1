@@ -138,13 +138,22 @@ Describe 'Set-CloneSafety' {
     It 'searches for URL-shaped forms of the bare host (no www) and then the bare host, and passes when nothing is found' {
         Set-CloneSafety 'acme' 'https://www.Live.example.com/'
         $q = @($script:calls | Where-Object { $_[0] -eq 'db' } | ForEach-Object { $_[2] })
-        $q | Should -Be @('//live.example.com', '\/\/live.example.com', '%2F%2Flive.example.com', 'live.example.com')
+        $q | Should -Be @('//live.example.com', '\/\/live.example.com', '%2F%2Flive.example.com', '//www.live.example.com', '\/\/www.live.example.com', '%2F%2Fwww.live.example.com', 'live.example.com')
         $script:calls | Where-Object { $_[0] -eq 'db' } | ForEach-Object { $_ | Should -Contain '--all-tables' }
     }
     It 'throws listing tables when a URL-shaped live host remains, after applying the other defaults' {
         $script:urlHits = @('wp_posts:post_content', 'wp_options:option_value')
         { Set-CloneSafety 'acme' 'https://live.example.com' } | Should -Throw '*still present*wp_posts:post_content*'
         $script:calls | Where-Object { $_[0] -eq 'option' } | Should -Not -BeNullOrEmpty
+    }
+    It 'throws when only a www URL form remains (reported by the www patterns)' {
+        Mock Invoke-SiteWpCli {
+            $script:calls.Add($WpArgs)
+            if ($WpArgs[0] -eq 'eval') { return 'wpd-cron-off' }
+            if ($WpArgs[0] -eq 'plugin') { return @() }
+            if ($WpArgs[0] -eq 'db' -and $WpArgs[2] -eq '//www.live.example.com') { return 'wp_options:option_value' }
+        }
+        { Set-CloneSafety 'acme' 'https://live.example.com' } | Should -Throw '*still present*wp_options:option_value*'
     }
     It 'only warns (no throw) when the bare host remains, capped at 20 lines' {
         $script:bareHits = 1..25 | ForEach-Object { "wp_users:user_email$_" }
@@ -237,10 +246,29 @@ Describe 'Clone safety integration (real Docker, alternate ports)' -Tag Integrat
         $active | Should -Contain 'harmless-one'
         Test-Path (Join-Path $plug 'wp-mail-smtp') | Should -BeTrue
     }
-    It 'throws and names the table when a URL-shaped live host survives (upper-case scheme and host: the replacements are case-sensitive)' {
+    It 'throws on an uncovered URL form (upper-case scheme and host: the replacements are case-sensitive, the search is not)' {
         Invoke-SiteWpCli 'safe' @('option', 'update', 'wpd_upper', 'see HTTPS://LIVE.EXAMPLE.COM/x') | Out-Null
         { Set-CloneSafety 'safe' 'https://live.example.com' -WarningAction SilentlyContinue } | Should -Throw '*still present*wp_options*'
         Invoke-SiteWpCli 'safe' @('option', 'delete', 'wpd_upper') | Out-Null
+        Invoke-SiteWpCli 'safe' @('option', 'update', 'wpd_upperwww', 'see HTTPS://WWW.LIVE.EXAMPLE.COM/x') | Out-Null
+        { Set-CloneSafety 'safe' 'https://live.example.com' -WarningAction SilentlyContinue } | Should -Throw '*still present*wp_options*'
+        Invoke-SiteWpCli 'safe' @('option', 'delete', 'wpd_upperwww') | Out-Null
         { Set-CloneSafety 'safe' 'https://live.example.com' -WarningAction SilentlyContinue } | Should -Not -Throw
+    }
+    It 'db search matches backslash and percent patterns literally (no LIKE escapes or wildcards)' {
+        # Only the escaped pattern can match this value (no plain //host in it): a throw proves the backslashes are literal.
+        Invoke-SiteWpCli 'safe' @('option', 'update', 'wpd_esc', 'REALQ HTTPS:\/\/LIVE.EXAMPLE.COM') | Out-Null
+        $err = try { Set-CloneSafety 'safe' 'https://live.example.com' -WarningAction SilentlyContinue; '' } catch { $_.Exception.Message }
+        $err | Should -Match 'still present'
+        Invoke-SiteWpCli 'safe' @('option', 'delete', 'wpd_esc') | Out-Null
+        # Decoy: would match %2F%2Flive.example.com only if "%" were a wildcard. Real value matches only the encoded pattern.
+        Invoke-SiteWpCli 'safe' @('option', 'update', 'wpd_decoy', 'DECOYZ a2Fb2Flive.example.com') | Out-Null
+        Set-CloneSafety 'safe' 'https://live.example.com' -WarningAction SilentlyContinue   # decoy alone must not throw
+        Invoke-SiteWpCli 'safe' @('option', 'update', 'wpd_enc', 'REALQ HTTPS%3A%2F%2FLIVE.EXAMPLE.COM') | Out-Null
+        $err = try { Set-CloneSafety 'safe' 'https://live.example.com' -WarningAction SilentlyContinue; '' } catch { $_.Exception.Message }
+        $err | Should -Match 'still present'
+        $err | Should -Not -Match 'DECOYZ'
+        Invoke-SiteWpCli 'safe' @('option', 'delete', 'wpd_enc') | Out-Null
+        Invoke-SiteWpCli 'safe' @('option', 'delete', 'wpd_decoy') | Out-Null
     }
 }

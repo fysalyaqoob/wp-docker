@@ -47,18 +47,20 @@ function Assert-NoLiveHost {
     $h = ($h.ToLowerInvariant() -replace '^www\.', '')
     Write-Host "Checking the database for leftover live URLs ($h); this scans every table and can take a while on large sites..."
     $urlHits = @()
-    foreach ($pat in "//$h", "\/\/$h", "%2F%2F$h") { $urlHits += Search-WpdDb $Name $pat }
+    foreach ($host_ in $h, "www.$h") {
+        foreach ($pat in "//$host_", "\/\/$host_", "%2F%2F$host_") { $urlHits += Search-WpdDb $Name $pat }
+    }
     if ($urlHits) {
         $shown = ($urlHits | Select-Object -First 20) -join "`n  "
         throw ("A live URL for '$h' is still present after URL replacement. The rest of the clone safety defaults were applied and the site is otherwise safe.`n" +
             "Found in (table:column):`n  $shown`n" +
-            "Likely cause: an escaped or encoded form the tool does not cover (upper-case host, double-escaped slashes). Inspect with: wpd-style WP-CLI 'wp db search //$h --all-tables', then fix with 'wp search-replace <old> <new> --all-tables --precise'.")
+            "Likely cause: an escaped or encoded form the tool does not cover (upper-case host, double-escaped slashes). Inspect with the WP-CLI command: wp db search //$h --all-tables  and fix with: wp search-replace <old> <new> --all-tables --precise")
     }
     $bare = @(Search-WpdDb $Name $h)
     if ($bare) {
         $shown = ($bare | Select-Object -First 20) -join "`n  "
         $more = if ($bare.Count -gt 20) { "`n  ...and $($bare.Count - 20) more" } else { '' }
-        Write-Warning "The text '$h' still appears in the database, but not as a URL (usually email addresses). It was left untouched on purpose. Found in (table:column):`n  $shown$more"
+        Write-Warning "The text '$h' still appears in the database, but not matched as a //host URL (usually email addresses). It was left untouched on purpose. Found in (table:column):`n  $shown$more"
     }
 }
 
