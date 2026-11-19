@@ -6,18 +6,19 @@
 
 **Architecture:** One shared Traefik proxy + dnsmasq DNS container on network `wpd-net`; per-site Compose stack (WordPress, MariaDB, WP-CLI, Mailpit). `wpd.ps1` dispatches to small modules in `lib/`. Compose files are rendered from templates in `templates/`.
 
-**Tech Stack:** Windows PowerShell 5.1, Docker Desktop 29.x, Traefik, dnsmasq, mkcert, MariaDB, WP-CLI, Mailpit, Pester 5 for tests.
+**Tech Stack:** PowerShell 7 (`pwsh`, Windows and macOS), Docker Desktop 29.x, Traefik, dnsmasq, mkcert, MariaDB, WP-CLI, Mailpit, Pester 5 for tests.
 
 **Spec:** `docs/superpowers/specs/2026-11-19-wp-docker-tool-design.md`
 
 ## Global Constraints
 
-- Windows 11 first; Windows PowerShell 5.1 compatible (no `&&`, `?:`, `??`).
+- Runs on Windows 11 and macOS under PowerShell 7+ (`pwsh`). All OS-specific behavior lives in `lib/Platform.ps1`; no other file may branch on the OS or call Windows-only cmdlets. Use `Join-Path` and `$IsWindows`/`$IsMacOS`, never hard-coded separators.
+- macOS support is written to spec and not testable on the owner's machine; mark it "untested on macOS" in the README until a Mac user confirms.
 - Default TLD `.test`. Never `.local`.
-- Default sites root `D:\Development\Clients`; overridable (env `WPD_SITES_ROOT`, then `~\.wpd\config.json`). Nothing for sites on C:.
-- Site files AND database data bind-mounted under `<SitesRoot>\<name>\`.
-- Ports 80/443 owned by Traefik; CLI reports the holder (e.g. Laragon `httpd`) and never kills it.
-- DNS: dnsmasq answers `*.test` with `127.0.0.1`; Windows NRPT rule for namespace `.test` (one-time admin).
+- Sites root: env `WPD_SITES_ROOT`, then `~/.wpd/config.json`, then default `~/Sites`. `wpd setup` asks once and saves it. The owner's own value is never a code default.
+- Hybrid layout: WordPress core, uploads and DB data in Docker volumes; only `wp-content/themes`, `plugins` and `mu-plugins` bind-mounted from `<SitesRoot>\<name>\wp-content\`. Per-site mkcert certificate with the site name as SAN (no `*.test` wildcard: Windows Schannel rejects it). Traefik v3.6+ (v3.1 fails on Docker 29). README and `wpd doctor` explain moving Docker Desktop's disk image to D:.
+- Ports 80/443 owned by Traefik; CLI reports the holder generically (no hard-coded Laragon). It may stop a recognized local server (Laragon, XAMPP, WAMP, IIS, nginx, Apache) only after an explicit interactive yes, records it in `~\.wpd\stopped.json`, and `wpd resume` restarts it. Never silent, never default, never for unrecognized processes.
+- DNS: dnsmasq answers `*.test` with `127.0.0.1`. One-time OS hook: Windows NRPT rule for namespace `.test`; macOS `/etc/resolver/test` containing `nameserver 127.0.0.1` (sudo once). Both via `Register-TestDns`.
 - PHP limits baked in: `upload_max_filesize`/`post_max_size` 2G, `memory_limit` 512M, `max_execution_time` 600.
 - Generated WP config: `WP_HOME`/`WP_SITEURL` = local URL, `WP_ENVIRONMENT_TYPE=local`, `WP_DEBUG` on.
 - Clone safety: mail forced to Mailpit, `DISABLE_WP_CRON` true, risky plugins deactivated, search engines discouraged, URL search-replace via WP-CLI.
@@ -35,6 +36,7 @@
 ## File Structure
 
 - `wpd.ps1`: entry point, argument parsing, dispatch.
+- `lib/Platform.ps1`: the only OS-specific file. Produces: `Get-PortHolder([int]$Port,[ValidateSet('tcp','udp')][string]$Protocol) -> string` (Windows `Get-NetTCPConnection`/`Get-NetUDPEndpoint`, macOS `lsof`), `Register-TestDns() -> void`, `Test-TestDns() -> bool`, `Install-Mkcert() -> void` (winget / brew), `Get-DefaultSitesRoot() -> string`, `Get-KnownServers() -> object[]` (recognized local servers and how to stop/start them per OS). Tests mock these; Task 2 owns `Get-PortHolder` moving here.
 - `lib/Config.ps1`, `lib/Docker.ps1`, `lib/Infra.ps1`, `lib/Site.ps1`, `lib/Safety.ps1`, `lib/CloneSsh.ps1`, `lib/Wpress.ps1`, `lib/Doctor.ps1`: one responsibility each.
 - `templates/infra/docker-compose.yml`, `templates/infra/dnsmasq.conf`, `templates/site/docker-compose.yml.tpl`, `templates/site/php.ini`, `templates/risky-plugins.txt`.
 - `skill/SKILL.md`; `README.md`; `LICENSE`; `.gitignore`.
@@ -48,22 +50,22 @@
 
 **Interfaces:** Produces: written answers the later tasks rely on.
 
-- [ ] **Step 1:** Stop Laragon; disable ICS (`Stop-Service SharedAccess; Set-Service SharedAccess -StartupType Disabled`, admin) with the owner's go-ahead; confirm `Get-NetUDPEndpoint -LocalPort 53` is empty.
+- [ ] **Step 1:** First try the non-destructive route: bind a test DNS container to `127.0.0.1:53` with ICS and the existing web server untouched, and test Traefik on alternate ports (8080/8443) so nothing needs stopping. Only if port 53 truly cannot bind, ask the owner for an explicit yes before disabling ICS (`Stop-Service SharedAccess; Set-Service SharedAccess -StartupType Disabled`, admin) and before stopping any web server on 80/443. Record exactly what was changed so it can be undone.
 - [ ] **Step 2:** Run dnsmasq in Docker publishing `127.0.0.1:53`; add NRPT rule `Add-DnsClientNrptRule -Namespace ".test" -NameServers 127.0.0.1`; verify `Resolve-DnsName anything.test` returns `127.0.0.1`. Record whether it works and the exact steps.
 - [ ] **Step 3:** `winget install FiloSottile.mkcert`; `mkcert -install`; `mkcert "*.test"`; serve a test page through Traefik with it; verify `curl https://hello.test` gives 200 without `-k`.
-- [ ] **Step 4:** Take one real `.wpress` from the owner's sites; record the archive header layout actually seen (expected: 4377-byte header = name 255, size 14, mtime 12, path 4096, ends with an all-zero block), and how table names appear in `database.sql` (expected prefix token `SERVMASK_PREFIX_`). Record bind-mount page-load time from D: for a stock WordPress.
+- [ ] **Step 4:** Take one real `.wpress` from the owner's sites; record the archive header layout actually seen (expected: 4377-byte header = name 255, size 14, mtime 12, path 4096, ends with an all-zero block), and how table names appear in `database.sql` (expected prefix token `SERVMASK_PREFIX_`). Record bind-mount page-load time from a Windows drive for a stock WordPress.
 - [ ] **Step 5:** Commit notes. Expected: all four answers written; any failure is reported to the owner before Task 3.
 
 ### Task 2: Skeleton, config, input validation
 
-**Files:** Create `wpd.ps1`, `lib/Config.ps1`, `lib/Docker.ps1`, `tests/Config.Tests.ps1`.
+**Files:** Create `wpd.ps1`, `lib/Config.ps1`, `lib/Docker.ps1`, `lib/Platform.ps1`, `tests/Config.Tests.ps1`.
 
 **Interfaces:**
-- Produces: `Get-WpdConfig -> hashtable @{SitesRoot; Tld; Network; InfraRoot}`; `Assert-SiteName([string]$Name) -> void` (throws); `Invoke-Docker([string[]]$Args) -> string[]` (throws on non-zero exit); `Assert-DockerRunning() -> void` (throws "start Docker Desktop"); `Get-PortHolder([int]$Port, [ValidateSet('tcp','udp')][string]$Protocol) -> string` (process name or `$null`).
+- Produces: `Get-WpdConfig -> hashtable @{SitesRoot; Tld; Network; InfraRoot}`; `Assert-SiteName([string]$Name) -> void` (throws); `Invoke-Docker([string[]]$Args) -> string[]` (throws on non-zero exit); `Assert-DockerRunning() -> void` (throws "start Docker Desktop"); `lib/Platform.ps1` functions listed in File Structure (`Get-PortHolder` returns the process name or `$null`; `Get-DefaultSitesRoot` returns `~/Sites`).
 
-- [ ] **Step 1:** Tests: default `SitesRoot` is `D:\Development\Clients`; env `WPD_SITES_ROOT` overrides it; `Assert-SiteName` accepts `acme`, `acme-2` and throws for `Acme`, `a b`, `a.b`, `..\x`, empty, 42-char name.
+- [ ] **Step 1:** Tests: default `SitesRoot` is `Get-DefaultSitesRoot` (`~/Sites`); env `WPD_SITES_ROOT` overrides it; `Assert-SiteName` accepts `acme`, `acme-2` and throws for `Acme`, `a b`, `a.b`, `..\x`, empty, 42-char name.
 - [ ] **Step 2:** Run `Invoke-Pester tests/Config.Tests.ps1`; expect FAIL.
-- [ ] **Step 3:** Implement per signatures; name pattern `^[a-z0-9]([a-z0-9-]{0,40}[a-z0-9])?$`. `wpd.ps1` dispatches `setup|doctor|new|clone|up|down|list|rm|help` and prints usage for unknown input.
+- [ ] **Step 3:** Implement per signatures; name pattern `^[a-z0-9]([a-z0-9-]{0,40}[a-z0-9])?$`. `wpd.ps1` dispatches `setup|doctor|resume|new|clone|up|down|list|rm|help` and prints usage for unknown input.
 - [ ] **Step 4:** Run tests; expect PASS. Commit `feat: skeleton, config, name validation`.
 
 ### Task 3: `wpd setup` and `wpd doctor`
@@ -72,9 +74,9 @@
 
 **Interfaces:**
 - Consumes: Task 2 `Get-WpdConfig`, `Invoke-Docker`, `Get-PortHolder`.
-- Produces: `Initialize-Infra() -> void` (idempotent: network, mkcert wildcard cert, dnsmasq, Traefik, NRPT rule); `Test-Infra() -> [pscustomobject[]]` each `@{Name; Ok; Fix}`, checks: Docker running, ports 80/443 holder, port 53 holder, mkcert installed and CA trusted, NRPT rule present, `wpd-net` exists, Traefik and DNS containers up.
+- Produces: `Stop-PortConflicts([switch]$Confirm) -> void` (asks per recognized server, stops only on yes, writes `~\.wpd\stopped.json` with name, kind (service or process), and restart command); `Resume-PortConflicts() -> void` (restarts what the file lists, reports each, clears the file; no-op with a message if the file is absent); `Initialize-Infra() -> void` (idempotent: network, mkcert local CA, dnsmasq, Traefik, NRPT rule); `Test-Infra() -> [pscustomobject[]]` each `@{Name; Ok; Fix}`, checks: Docker running, ports 80/443 holder, port 53 holder, mkcert installed and CA trusted, NRPT rule present, `wpd-net` exists, Traefik and DNS containers up.
 
-- [ ] **Step 1:** Unit test `Test-Infra` with mocked `Get-PortHolder` returning `httpd`: result contains a failing item whose `Fix` names `httpd` and says to stop it. Mock holder `svchost` on 53: `Fix` mentions Internet Connection Sharing. Integration test (tag): after `Initialize-Infra` twice, `Test-Infra` all `Ok`.
+- [ ] **Step 1:** Unit tests: `Stop-PortConflicts` with a mocked holder `httpd` and a "no" answer stops nothing and writes no state; with "yes" it stops it and the state file lists it; `Resume-PortConflicts` restarts exactly what the state file lists and clears it; an unrecognized holder is never stopped. Unit test `Test-Infra` with mocked `Get-PortHolder` returning `httpd`: result contains a failing item whose `Fix` names `httpd` and mentions `wpd setup` offering to stop it. Mock holder `svchost` on 53: `Fix` mentions Internet Connection Sharing. Integration test (tag): after `Initialize-Infra` twice, `Test-Infra` all `Ok`.
 - [ ] **Step 2:** Run; expect FAIL.
 - [ ] **Step 3:** Implement using the exact commands proven in Task 1. NRPT step self-elevates once and says why.
 - [ ] **Step 4:** Run unit tests, then integration; expect PASS. Commit `feat: setup and doctor`.
@@ -89,7 +91,7 @@
 
 - [ ] **Step 1:** Tests: `Format-SiteCompose` output contains Traefik host rule ``Host(`acme.test`)``, bind mounts under the site folder, and the chosen PHP tag; `New-WpdSite` on an existing folder throws and changes nothing; `Remove-WpdSite` without `-Force` and without confirmation leaves the folder intact. Integration: `New-WpdSite smoke` then `Invoke-WebRequest https://smoke.test` returns 200, and the wp-admin login with the returned credentials works.
 - [ ] **Step 2:** Run; expect FAIL.
-- [ ] **Step 3:** Implement. Generate random DB and admin passwords; store them in `<site>\.wpd-credentials.txt` (git-ignored by tool-generated `.gitignore` inside the site folder). Install WordPress with WP-CLI; write the PHP ini and WP constants from Global Constraints.
+- [ ] **Step 3:** Implement. Issue a per-site mkcert cert (site name as SAN) into Traefik's watched dynamic-config folder; report the measured hybrid page load in the task report. Generate random DB and admin passwords; store them in `<site>\.wpd-credentials.txt` (git-ignored by tool-generated `.gitignore` inside the site folder). Install WordPress with WP-CLI; write the PHP ini and WP constants from Global Constraints.
 - [ ] **Step 4:** Run; expect PASS. Commit `feat: new site and lifecycle`.
 
 ### Task 5: Clone safety defaults
@@ -118,7 +120,7 @@
 **Files:** Create `lib/Wpress.ps1`, `tests/Wpress.Tests.ps1`.
 
 **Interfaces:**
-- Produces: `Expand-Wpress([string]$File, [string]$Destination) -> [pscustomobject]@{DatabasePath; FileCount; OldUrl}` (layout as recorded in Task 1; streams the file, handles sizes over 4 GB; throws on a truncated archive or missing `database.sql`); `Import-Wpress([string]$Name, [string]$File) -> [pscustomobject]` (create blank site, expand, replace `SERVMASK_PREFIX_` with the site's table prefix, import DB, run `Set-CloneSafety`).
+- Produces: `Expand-Wpress([string]$File, [string]$Destination) -> [pscustomobject]@{DatabasePath; FileCount; OldUrl}` (layout as recorded in `docs/spike-notes.md`: 4377-byte headers, archive end detected by an empty name field NOT an all-zero block, `database.sql` sits near the end of the archive; streams the file, handles sizes over 4 GB; throws on a truncated archive or missing `database.sql`); `Import-Wpress([string]$Name, [string]$File) -> [pscustomobject]` (create blank site, expand, replace `SERVMASK_PREFIX_` with the site's table prefix, import DB, run `Set-CloneSafety`).
 
 - [ ] **Step 1:** Tests build a tiny synthetic archive in the test: expands two files plus `database.sql`; truncated archive throws; archive without `database.sql` throws; failed import leaves no site folder.
 - [ ] **Step 2:** Run; expect FAIL. **Step 3:** Implement with a `FileStream` reader; no whole-file reads. **Step 4:** Run; expect PASS. **Step 5:** Run against the real `.wpress` from Task 1; site loads at `https://<name>.test` with content intact. Commit `feat: clone from .wpress`.
@@ -130,7 +132,7 @@
 - [ ] **Step 1:** `SKILL.md`: when to use each command, run `wpd doctor` first, never run `rm`/`-Force` without asking the user, never stop Laragon or disable ICS without asking.
 - [ ] **Step 2:** `README.md`: what it is, prerequisites (Docker Desktop, winget), one-time `wpd setup`, command table, how to configure sites root, troubleshooting from `doctor` messages. No personal paths or names.
 - [ ] **Step 3:** `wpd setup` offers to copy `skill/SKILL.md` to `~\.claude\skills\wpd\SKILL.md`.
-- [ ] **Step 4:** Verify no personal or work names, emails, or `C:\Users\...` paths appear in tracked files (`git grep -n -i -E 'C:\\Users|@gmail|@.*\.com'` returns nothing relevant). Commit.
+- [ ] **Step 4:** Verify no personal or work names, emails, or home-folder paths appear in tracked files (a `git grep` for drive paths, user names and email domains returns nothing relevant). Commit.
 
 ### Task 9: End-to-end smoke test
 

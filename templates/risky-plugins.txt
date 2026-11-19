@@ -1,0 +1,45 @@
+# Plugins that are deactivated (never deleted) after a clone, because they talk to live services
+# (payments, mail, marketing, caches tied to the live host, backups). One slug per line. Edit freely.
+# Only plugins that are installed AND active are touched.
+
+# Payment gateways
+woocommerce-gateway-stripe
+woocommerce-paypal-payments
+woocommerce-gateway-paypal-express-checkout
+woocommerce-square
+
+# SMTP and transactional mail
+wp-mail-smtp
+post-smtp
+easy-wp-smtp
+fluent-smtp
+sendgrid-email-delivery-simplified
+mailgun
+mailjet-for-wordpress
+sendinblue-woocommerce
+mailpoet
+postmark-approved-wordpress-plugin
+wp-ses
+smtp-mailer
+gmail-smtp
+
+# Email marketing
+mailchimp-for-wp
+mailchimp-for-woocommerce
+
+# Caching and performance (tied to the live host)
+wp-rocket
+w3-total-cache
+wp-super-cache
+wp-fastest-cache
+litespeed-cache
+
+# Backups
+updraftplus
+
+# Premium variants and live-service connectors
+wp-mail-smtp-pro
+mc4wp-premium
+woocommerce-payments
+klaviyo
+jetpack
