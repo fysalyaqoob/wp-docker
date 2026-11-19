@@ -1,7 +1,7 @@
 #!/usr/bin/env pwsh
 param([Parameter(Position = 0)][string]$Command = 'help', [Parameter(ValueFromRemainingArguments)][string[]]$Rest)
 $ErrorActionPreference = 'Stop'
-foreach ($f in 'Platform', 'Config', 'Docker', 'Infra', 'Doctor', 'Site') { . (Join-Path $PSScriptRoot "lib/$f.ps1") }
+foreach ($f in 'Platform', 'Config', 'Docker', 'Infra', 'Doctor', 'Site', 'Safety') { . (Join-Path $PSScriptRoot "lib/$f.ps1") }
 
 $usage = @'
 Usage: wpd <command> [args]

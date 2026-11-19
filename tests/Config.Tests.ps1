@@ -52,6 +52,12 @@ Describe 'Get-WpdConfig' {
         $c.InfraPrefix | Should -Be 'wpdtest'
         $c.Network | Should -Be 'wpdtest-net'
     }
+    It 'rejects an InfraPrefix that could collide Traefik names (underscore, uppercase, spaces)' {
+        foreach ($bad in 'my_wpd', 'Wpd', 'a b', '-x') {
+            $env:WPD_INFRA_PREFIX = $bad
+            { Get-WpdConfig } | Should -Throw '*WPD_INFRA_PREFIX*'
+        }
+    }
     It 'rejects a non-numeric port with a clear error' {
         $env:WPD_HTTP_PORT = 'abc'
         { Get-WpdConfig } | Should -Throw '*WPD_HTTP_PORT*'

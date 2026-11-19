@@ -25,8 +25,12 @@ function Get-WpdConfig {
     }
     if (-not $root) { $root = Get-DefaultSitesRoot }
     $prefix = if ($env:WPD_INFRA_PREFIX) { $env:WPD_INFRA_PREFIX } else { 'wpd' }
+    # Same shape as a site name (no "_"), so Traefik names built from it cannot collide.
+    if ($prefix -cnotmatch '^[a-z0-9]([a-z0-9-]{0,40}[a-z0-9])?\z') {
+        throw "Invalid WPD_INFRA_PREFIX '$prefix'. Use 1-42 lowercase letters, digits or hyphens, starting and ending with a letter or digit (no underscores)."
+    }
     @{
-        SitesRoot   = $root
+        SitesRoot  = $root
         Tld         = 'test'
         InfraPrefix = $prefix
         Network     = "$prefix-net"
