@@ -1,4 +1,4 @@
-BeforeAll {
+﻿BeforeAll {
     . "$PSScriptRoot/../lib/Platform.ps1"
     . "$PSScriptRoot/../lib/Config.ps1"
     . "$PSScriptRoot/../lib/Docker.ps1"
@@ -168,6 +168,15 @@ Describe 'Set-CloneSafety' {
         Set-CloneSafety 'acme' 'https://live.example.com'
         $script:calls | Where-Object { $_[0] -eq 'eval' } | ForEach-Object { $_ | Should -Contain '--skip-plugins'; $_ | Should -Contain '--skip-themes' }
     }
+    It 'rewrites serialized objects that search-replace skips, with every replacement pair' {
+        Set-CloneSafety 'acme' 'https://live.example.com'
+        $e = @($script:calls | Where-Object { $_[0] -eq 'eval' -and "$($_[3])" -match 'wpd_sr' })
+        $e.Count | Should -Be 1
+        $b64 = [regex]::Match($e[0][3], 'base64_decode\("([^"]+)"\)').Groups[1].Value
+        $json = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b64))
+        @($json | ConvertFrom-Json).Count | Should -Be 16
+        $json | Should -Match 'https://live\.example\.com'
+    }
     It 'seed list includes premium variants' {
         $l = Get-RiskyPlugins
         foreach ($s in 'wp-mail-smtp-pro', 'mc4wp-premium', 'woocommerce-payments', 'klaviyo', 'jetpack') { $l | Should -Contain $s }
@@ -270,5 +279,17 @@ Describe 'Clone safety integration (real Docker, alternate ports)' -Tag Integrat
         $err | Should -Not -Match 'DECOYZ'
         Invoke-SiteWpCli 'safe' @('option', 'delete', 'wpd_enc') | Out-Null
         Invoke-SiteWpCli 'safe' @('option', 'delete', 'wpd_decoy') | Out-Null
+    }
+    It 'rewrites live URLs inside serialized objects of classes that are not loaded (search-replace skips them)' {
+        $live = 'live.example.com'
+        $s = "O:7:`"Missing`":2:{s:3:`"url`";s:$(("https://$live/p").Length):`"https://$live/p`";s:2:`"id`";i:7;}"
+        $php = "global `$wpdb; `$wpdb->insert(`$wpdb->options, ['option_name'=>'wpd_obj','option_value'=>'$s','autoload'=>'no']);"
+        Invoke-SiteWpCli 'safe' @('eval', '--skip-plugins', '--skip-themes', $php) | Out-Null
+        Set-CloneSafety 'safe' "https://$live" -WarningAction SilentlyContinue
+        $v = (Invoke-SiteWpCli 'safe' @('eval', 'global $wpdb; echo $wpdb->get_var("SELECT option_value FROM $wpdb->options WHERE option_name=\"wpd_obj\"");')) -join ''
+        $v | Should -Not -Match 'live\.example'
+        $v | Should -Match '^O:7:"Missing":2:\{s:3:"url";s:(\d+):"https://safe\.test:8443/p";'
+        [int][regex]::Match($v, 's:3:"url";s:(\d+):').Groups[1].Value | Should -Be 'https://safe.test:8443/p'.Length
+        Invoke-SiteWpCli 'safe' @('option', 'delete', 'wpd_obj') | Out-Null
     }
 }

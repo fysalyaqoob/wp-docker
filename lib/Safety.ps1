@@ -64,6 +64,45 @@ function Assert-NoLiveHost {
     }
 }
 
+function Repair-SerializedObjectUrls {
+    # `wp search-replace` silently skips serialized values holding PHP objects of classes that are not loaded, and wpd runs it
+    # with --skip-plugins (found on a real backup: an Elementor log option full of Elementor\...\Items objects). This pass
+    # rewrites only the leftovers: it walks the serialized text, replaces inside each s:N:"..." string literal and recomputes N,
+    # so objects need not be instantiated. Plain (non-serialized) values are left to search-replace.
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)]$Pairs)
+    $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -Compress -InputObject @($Pairs | ForEach-Object { , @($_[0], $_[1]) }))))
+    $php = @'
+global $wpdb; $pairs = json_decode(base64_decode("__B64__"), true); // wpd_sr
+function wpd_sr($s, $pairs) {
+  $out = ""; $i = 0; $n = strlen($s);
+  while ($i < $n) {
+    if ($s[$i] === "s" && preg_match("/\\Gs:(\\d+):\"/", $s, $m, 0, $i)) {
+      $len = (int)$m[1]; $st = $i + strlen($m[0]);
+      if (substr($s, $st + $len, 2) === "\";") {
+        $str = substr($s, $st, $len); foreach ($pairs as $p) { $str = str_replace($p[0], $p[1], $str); }
+        $out .= "s:" . strlen($str) . ":\"" . $str . "\";"; $i = $st + $len + 2; continue;
+      }
+    }
+    $out .= $s[$i]; $i++;
+  }
+  return $out;
+}
+$conds = []; foreach ($pairs as $p) { $conds[] = "LOCATE(CAST(0x" . bin2hex($p[0]) . " AS CHAR CHARACTER SET utf8mb4) COLLATE utf8mb4_general_ci, %COL%)>0"; }
+$cols = $wpdb->get_results("SELECT TABLE_NAME t, COLUMN_NAME c FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND DATA_TYPE IN ('char','varchar','text','tinytext','mediumtext','longtext')");
+$fixed = 0;
+foreach ($cols as $r) {
+  $where = implode(" OR ", array_map(function($c) use ($r) { return str_replace("%COL%", "`$r->c`", $c); }, $conds));
+  $vals = $wpdb->get_col("SELECT `$r->c` FROM `$r->t` WHERE ($where) AND `$r->c` REGEXP '^[aOsCd]:[0-9]+[:{]'");
+  foreach ($vals as $old) {
+    $new = wpd_sr($old, $pairs);
+    if ($new !== $old && $wpdb->query($wpdb->prepare("UPDATE `$r->t` SET `$r->c`=%s WHERE BINARY `$r->c`=%s", $new, $old)) !== false) { $fixed++; }
+  }
+}
+echo "wpd-serialized-fixed:$fixed";
+'@.Replace('__B64__', $b64)
+    Invoke-SiteWpCli $Name @('eval', '--skip-plugins', '--skip-themes', $php) | Out-Null
+}
+
 function Set-CloneSafety {
     param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$OldUrl)
     Assert-SiteExists $Name
@@ -78,6 +117,9 @@ function Set-CloneSafety {
         try { Invoke-SiteWpCli $Name @('search-replace', $p[0], $p[1], '--all-tables', '--precise', '--skip-plugins', '--skip-themes') | Out-Null }
         catch { throw "URL search-replace failed for '$($p[0])'; the clone still contains live URLs. Fix the problem and run it again. $($_.Exception.Message)" }
     }
+
+    try { Repair-SerializedObjectUrls $Name (Get-UrlReplacements $OldUrl (Get-SiteUrl $Name)) }
+    catch { Write-Warning "Could not check serialized objects for live URLs: $($_.Exception.Message)" }   # the final host check still catches leftovers
 
     Invoke-SiteWpCli $Name @('option', 'update', 'blog_public', '0') | Out-Null
 
