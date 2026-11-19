@@ -69,9 +69,9 @@ Success: one command per job, sites reachable at `https://<name>.test` with a tr
 
 ### Per-site stack (`<SitesRoot>\<name>\`)
 
-Owner's sites root is `D:\Development\Clients` (nothing for sites on C:). Default in code is `~/Sites`; setup asks and saves it.
+The owner keeps sites on a non-system drive. Default in code is `~/Sites`; setup asks and saves it.
 
-**File layout (owner decision 2026-11-19, hybrid).** The spike measured a full bind mount from D: at 1.2 to 4 s per page versus about 0.07 s in a Docker volume. So WordPress core, `uploads` and the database live in Docker volumes; only `wp-content/themes`, `wp-content/plugins` and `wp-content/mu-plugins` are bind-mounted from `<SitesRoot>\<name>\wp-content\` so the owner edits code in their editor. Task 4 measures the hybrid page load and reports it; if still slow the owner decides. Docker volumes sit in Docker Desktop's disk image (on C: by default); the README and `wpd doctor` explain how to move that image to D: (owner asked for this to be documented).
+**File layout (owner decision 2026-11-19, hybrid).** The spike measured a full bind mount from a Windows drive at 1.2 to 4 s per page versus about 0.07 s in a Docker volume. So WordPress core, `uploads` and the database live in Docker volumes; only `wp-content/themes`, `wp-content/plugins` and `wp-content/mu-plugins` are bind-mounted from `<SitesRoot>\<name>\wp-content\` so the owner edits code in their editor. Task 4 measures the hybrid page load and reports it; if still slow the owner decides. Docker volumes sit in Docker Desktop's disk image (on C: by default); the README and `wpd doctor` explain how to move that image to D: (owner asked for this to be documented).
 
 **Certificates.** One certificate per site (the site name as a SAN), generated with mkcert when the site is created: a bare `*.test` wildcard is rejected by Windows Schannel (spike finding). Traefik loads certs from a watched dynamic-config folder.
 
@@ -109,7 +109,7 @@ After any clone: run search-replace live to local URL (including serialized data
 - 1-2 sites at once, each on its own `.test` domain.
 - HTTPS via mkcert, local DNS (not hosts-file editing).
 - Approach B: CLI with thin skill.
-- Sites root `D:\Development\Clients`.
+- Sites root `<SitesRoot>`.
 - Does not use Internet Connection Sharing; disabling it is fine.
 - Has no All-in-One WP Migration Unlimited extension license.
 

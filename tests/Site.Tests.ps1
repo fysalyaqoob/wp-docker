@@ -137,7 +137,7 @@ Describe 'site lifecycle (unit, Docker and mkcert mocked)' {
             $cred = Get-Content (Join-Path $r.Path '.wpd-credentials.txt') -Raw
             $cred | Should -Match ([regex]::Escape($r.AdminPassword))
             $compose = Get-Content (Join-Path $r.Path 'docker-compose.yml') -Raw
-            $dbPw = [regex]::Match($cred, 'DB password:\s*(\S+)').Groups[1].Value
+            $dbPw = [regex]::Match($cred, 'DB password: *(\S+)').Groups[1].Value
             $dbPw.Length | Should -BeGreaterOrEqual 20
             $dbPw | Should -Not -Be $r.AdminPassword
             $compose | Should -Match ([regex]::Escape($dbPw))
@@ -154,7 +154,7 @@ Describe 'site lifecycle (unit, Docker and mkcert mocked)' {
         It 'never prints the DB password' {
             $out = New-WpdSite smoke 6>&1 5>&1 4>&1 3>&1 | Out-String
             $cred = Get-Content (Join-Path $env:WPD_SITES_ROOT 'smoke/.wpd-credentials.txt') -Raw
-            $dbPw = [regex]::Match($cred, 'DB password:\s*(\S+)').Groups[1].Value
+            $dbPw = [regex]::Match($cred, 'DB password: *(\S+)').Groups[1].Value
             $out | Should -Not -Match ([regex]::Escape($dbPw))
         }
         It 'refuses an existing folder and changes nothing' {

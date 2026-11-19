@@ -11,7 +11,7 @@ Date: 2026-11-19. Host: Windows 11 Pro, Docker engine and client 29.8.1 (Docker 
 | Do ports 80/443 need freeing for the spike? | No (Traefik tested on 8080/8443). Laragon httpd holds 80/443 and will need handling in `wpd setup`. |
 | mkcert + Traefik HTTPS without `-k`? | Yes, but NOT with a bare `*.test` wildcard (see Risk A) and curl needs `--ssl-no-revoke` (see Risk B). |
 | `.wpress` layout | Matches expectation with two corrections (see below). |
-| Bind mount from D: | About 15x to 40x slower than a Docker volume. Real problem (see Risk C). |
+| Bind mount from a Windows drive | About 15x to 40x slower than a Docker volume. Real problem (see Risk C). |
 
 ## 1. Port 53 and ICS
 
@@ -71,15 +71,15 @@ Sample: an All-in-One WP Migration backup from a site's `wp-content\ai1wm-backup
 - Table names appear as `SERVMASK_PREFIX_<name>` in CREATE TABLE / INSERT / DROP statements (e.g. `SERVMASK_PREFIX_options`, `SERVMASK_PREFIX_comments`; 7148 occurrences in the first 3 MB). No literal `wp_` in CREATE TABLE. Importer should replace `SERVMASK_PREFIX_` with the target table prefix (also expect it inside option/usermeta values such as `SERVMASK_PREFIX_user_roles`; a plain replace of the token covers it).
 - The other .wpress files found (three other .wpress files in the Laragon www tree, and two 2018 files in a personal projects folder) were not opened. The 2018 files may use an older format; unverified.
 
-### Risk C: bind-mount page-load time from D:
+### Risk C: bind-mount page-load time from a Windows drive
 Stock `wordpress:php8.2-apache` + `mariadb:10.11`, installed via install.php, `curl` total time per request:
 
-| | Bind mount `D:\...:/var/www/html` | Docker named volume |
+| | Bind mount `<host folder>:/var/www/html` | Docker named volume |
 |--|--|--|
 | front page (6 requests) | 3.98, 2.63, 2.81, 2.39, 1.24, 1.54 s | 0.19, 0.07, 0.07, 0.08, 0.07, 0.06 s |
 | wp-login.php (4 requests) | 0.33, 0.34, 0.98, 0.31 s | 0.026, 0.022, 0.035, 0.020 s |
 
-The bind mount from D: is about 15x to 40x slower. Cold first hit about 4 s. Plugins-heavy sites will be worse. Task 3/4 design should keep WordPress core + wp-content in a named volume (or WSL2 filesystem) and, if edits from Windows are required, mount only `wp-content/themes` and `plugins` (or sync), rather than bind-mounting the whole site from D:.
+The bind mount from a Windows drive is about 15x to 40x slower. Cold first hit about 4 s. Plugins-heavy sites will be worse. Task 3/4 design should keep WordPress core + wp-content in a named volume (or WSL2 filesystem) and, if edits from Windows are required, mount only `wp-content/themes` and `plugins` (or sync), rather than bind-mounting the whole site from the host.
 
 ## Tooling notes
 
@@ -96,7 +96,7 @@ The bind mount from D: is about 15x to 40x slower. Cold first hit about 4 s. Plu
 | Docker images pulled by this spike (none of these four were present locally beforehand; the owner's own pre-existing images were not touched) | agent | Only the ones this spike pulled: `docker rmi alpine:3.20 traefik:v3.1 traefik:v3.6 traefik/whoami` (skip any you now use yourself) |
 
 Not changed: ICS/SharedAccess (Manual, Running), Laragon httpd on 80/443 (never stopped), system settings.
-Test containers, volume (`wpd-spike-vol`), networks and the D:\Development\wpd-spike-tmp folder were removed.
+Test containers, volume (`wpd-spike-vol`), networks and the spike temp folder were removed.
 
 ## Verified on Windows only; NOT verified on macOS
 
@@ -105,5 +105,5 @@ Everything above was run on Windows 11 only. Untested on macOS:
 - Binding `127.0.0.1:53` on macOS is untested.
 - `mkcert` via `brew` and `mkcert -install` (keychain prompt) are untested.
 - Docker socket path: `//var/run/docker.sock` is the Windows form; macOS uses `/var/run/docker.sock`. Untested.
-- Bind-mount slowness may differ on macOS; the 15x to 40x figure is Windows (D: drive) only.
+- Bind-mount slowness may differ on macOS; the 15x to 40x figure is Windows (non-system drive) only.
 - The Schannel wildcard and revocation quirks (Risks A and B) are Windows-specific.

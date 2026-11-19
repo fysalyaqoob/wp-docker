@@ -180,8 +180,8 @@ Describe 'Import-Wpress' {
     }
 }
 
-# Opt-in: WPD_INTEGRATION=1 and a real .wpress under D:\laragon\www (read only, smallest one over 3 MB). Alternate ports, never touches Laragon.
-$script:realWpress = if ($env:WPD_INTEGRATION) { Get-ChildItem 'D:\laragon\www' -Recurse -Filter *.wpress -ErrorAction SilentlyContinue | Where-Object Length -gt 3MB | Sort-Object Length | Select-Object -First 1 }
+# Opt-in: WPD_INTEGRATION=1 and WPD_WPRESS_DIR pointing at a folder holding a real .wpress (read only, smallest one over 3 MB). Alternate ports.
+$script:realWpress = if ($env:WPD_INTEGRATION -and $env:WPD_WPRESS_DIR) { Get-ChildItem $env:WPD_WPRESS_DIR -Recurse -Filter *.wpress -ErrorAction SilentlyContinue | Where-Object Length -gt 3MB | Sort-Object Length | Select-Object -First 1 }
 $env:WPD_REAL_WPRESS = if ($script:realWpress) { $script:realWpress.FullName } else { '' }   # discovery-scope variables are not visible inside It blocks
 Describe 'Wpress real file (structure only)' -Tag Integration -Skip:(-not $script:realWpress) {
     It 'expands a real archive' {

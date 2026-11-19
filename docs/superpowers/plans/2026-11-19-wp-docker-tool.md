@@ -15,7 +15,7 @@
 - Runs on Windows 11 and macOS under PowerShell 7+ (`pwsh`). All OS-specific behavior lives in `lib/Platform.ps1`; no other file may branch on the OS or call Windows-only cmdlets. Use `Join-Path` and `$IsWindows`/`$IsMacOS`, never hard-coded separators.
 - macOS support is written to spec and not testable on the owner's machine; mark it "untested on macOS" in the README until a Mac user confirms.
 - Default TLD `.test`. Never `.local`.
-- Sites root: env `WPD_SITES_ROOT`, then `~/.wpd/config.json`, then default `~/Sites`. `wpd setup` asks once and saves it. The owner's value is `D:\Development\Clients` (nothing for sites on C:); that value is never a code default.
+- Sites root: env `WPD_SITES_ROOT`, then `~/.wpd/config.json`, then default `~/Sites`. `wpd setup` asks once and saves it. The owner's own value is never a code default.
 - Hybrid layout: WordPress core, uploads and DB data in Docker volumes; only `wp-content/themes`, `plugins` and `mu-plugins` bind-mounted from `<SitesRoot>\<name>\wp-content\`. Per-site mkcert certificate with the site name as SAN (no `*.test` wildcard: Windows Schannel rejects it). Traefik v3.6+ (v3.1 fails on Docker 29). README and `wpd doctor` explain moving Docker Desktop's disk image to D:.
 - Ports 80/443 owned by Traefik; CLI reports the holder generically (no hard-coded Laragon). It may stop a recognized local server (Laragon, XAMPP, WAMP, IIS, nginx, Apache) only after an explicit interactive yes, records it in `~\.wpd\stopped.json`, and `wpd resume` restarts it. Never silent, never default, never for unrecognized processes.
 - DNS: dnsmasq answers `*.test` with `127.0.0.1`. One-time OS hook: Windows NRPT rule for namespace `.test`; macOS `/etc/resolver/test` containing `nameserver 127.0.0.1` (sudo once). Both via `Register-TestDns`.
@@ -53,7 +53,7 @@
 - [ ] **Step 1:** First try the non-destructive route: bind a test DNS container to `127.0.0.1:53` with ICS and the existing web server untouched, and test Traefik on alternate ports (8080/8443) so nothing needs stopping. Only if port 53 truly cannot bind, ask the owner for an explicit yes before disabling ICS (`Stop-Service SharedAccess; Set-Service SharedAccess -StartupType Disabled`, admin) and before stopping any web server on 80/443. Record exactly what was changed so it can be undone.
 - [ ] **Step 2:** Run dnsmasq in Docker publishing `127.0.0.1:53`; add NRPT rule `Add-DnsClientNrptRule -Namespace ".test" -NameServers 127.0.0.1`; verify `Resolve-DnsName anything.test` returns `127.0.0.1`. Record whether it works and the exact steps.
 - [ ] **Step 3:** `winget install FiloSottile.mkcert`; `mkcert -install`; `mkcert "*.test"`; serve a test page through Traefik with it; verify `curl https://hello.test` gives 200 without `-k`.
-- [ ] **Step 4:** Take one real `.wpress` from the owner's sites; record the archive header layout actually seen (expected: 4377-byte header = name 255, size 14, mtime 12, path 4096, ends with an all-zero block), and how table names appear in `database.sql` (expected prefix token `SERVMASK_PREFIX_`). Record bind-mount page-load time from D: for a stock WordPress.
+- [ ] **Step 4:** Take one real `.wpress` from the owner's sites; record the archive header layout actually seen (expected: 4377-byte header = name 255, size 14, mtime 12, path 4096, ends with an all-zero block), and how table names appear in `database.sql` (expected prefix token `SERVMASK_PREFIX_`). Record bind-mount page-load time from a Windows drive for a stock WordPress.
 - [ ] **Step 5:** Commit notes. Expected: all four answers written; any failure is reported to the owner before Task 3.
 
 ### Task 2: Skeleton, config, input validation
@@ -132,7 +132,7 @@
 - [ ] **Step 1:** `SKILL.md`: when to use each command, run `wpd doctor` first, never run `rm`/`-Force` without asking the user, never stop Laragon or disable ICS without asking.
 - [ ] **Step 2:** `README.md`: what it is, prerequisites (Docker Desktop, winget), one-time `wpd setup`, command table, how to configure sites root, troubleshooting from `doctor` messages. No personal paths or names.
 - [ ] **Step 3:** `wpd setup` offers to copy `skill/SKILL.md` to `~\.claude\skills\wpd\SKILL.md`.
-- [ ] **Step 4:** Verify no personal or work names, emails, or `C:\Users\...` paths appear in tracked files (`git grep -n -i -E 'C:\\Users|@gmail|@.*\.com'` returns nothing relevant). Commit.
+- [ ] **Step 4:** Verify no personal or work names, emails, or home-folder paths appear in tracked files (a `git grep` for drive paths, user names and email domains returns nothing relevant). Commit.
 
 ### Task 9: End-to-end smoke test
 
