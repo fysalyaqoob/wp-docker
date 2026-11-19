@@ -29,3 +29,10 @@ litespeed-cache
 
 # Backups
 updraftplus
+
+# Premium variants and live-service connectors
+wp-mail-smtp-pro
+mc4wp-premium
+woocommerce-payments
+klaviyo
+jetpack

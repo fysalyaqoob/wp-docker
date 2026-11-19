@@ -10,6 +10,7 @@ Usage: wpd <command> [args]
   up|down <name>           start / stop a site (data is kept)
   list                     show sites and whether they run
   rm <name> [--force]      delete a site (asks first unless --force)
+  clone: live URL replacement is a plain text replace, so https://live.com also rewrites inside https://live.com.au
 '@
 
 function Read-SiteArgs {
