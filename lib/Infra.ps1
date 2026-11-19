@@ -169,4 +169,16 @@ function Initialize-Infra {
 
     Register-TestDns
     Write-Host "Infra ready: Traefik on $($c.HttpPort)/$($c.HttpsPort), DNS on $($c.DnsPort), network $($c.Network)."
+    if (-not [Console]::IsInputRedirected) { Install-WpdSkill }   # no prompt in scripted or CI runs
+}
+
+function Install-WpdSkill {
+    # Offer (default no) to copy skill/SKILL.md to ~/.claude/skills/wpd/SKILL.md.
+    param([string]$HomeDir = $HOME)
+    $a = Read-Host 'Install the wpd Claude skill to ~/.claude/skills/wpd? [y/N]'
+    if ($a -notmatch '^(y|yes)$') { return }
+    $dest = Join-Path $HomeDir '.claude/skills/wpd'
+    New-Item -ItemType Directory $dest -Force | Out-Null
+    Copy-Item (Join-Path $PSScriptRoot '../skill/SKILL.md') (Join-Path $dest 'SKILL.md') -Force
+    Write-Host "Skill installed to $dest."
 }
