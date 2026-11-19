@@ -182,11 +182,12 @@ Describe 'Import-Wpress' {
 
 # Opt-in: WPD_INTEGRATION=1 and a real .wpress under D:\laragon\www (read only, smallest one over 3 MB). Alternate ports, never touches Laragon.
 $script:realWpress = if ($env:WPD_INTEGRATION) { Get-ChildItem 'D:\laragon\www' -Recurse -Filter *.wpress -ErrorAction SilentlyContinue | Where-Object Length -gt 3MB | Sort-Object Length | Select-Object -First 1 }
+$env:WPD_REAL_WPRESS = if ($script:realWpress) { $script:realWpress.FullName } else { '' }   # discovery-scope variables are not visible inside It blocks
 Describe 'Wpress real file (structure only)' -Tag Integration -Skip:(-not $script:realWpress) {
     It 'expands a real archive' {
         $d = Join-Path ([IO.Path]::GetTempPath()) "wpd-wpress-real-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
         try {
-            $r = Expand-Wpress $script:realWpress.FullName $d
+            $r = Expand-Wpress $env:WPD_REAL_WPRESS $d
             Test-Path $r.DatabasePath | Should -BeTrue
             $r.OldUrl | Should -Match '^https?://'
             $r.FileCount | Should -BeGreaterThan 0
@@ -216,7 +217,7 @@ Describe 'Import-Wpress integration (real Docker, alternate ports)' -Tag Integra
     }
     It 'imports a real archive and serves it over https with no live url left' {
         Initialize-Infra
-        $s = Import-Wpress -Name 'wpsite' -File $script:realWpress.FullName -NoUploads
+        $s = Import-Wpress -Name 'wpsite' -File $env:WPD_REAL_WPRESS -NoUploads
         $s.Name | Should -Be 'wpsite'
         $code = & curl.exe --silent --show-error --ssl-no-revoke --resolve 'wpsite.test:8443:127.0.0.1' -o NUL -w '%{http_code}' 'https://wpsite.test:8443/'
         $code | Should -Be '200'
