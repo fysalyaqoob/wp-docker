@@ -179,3 +179,46 @@ Describe 'Import-Wpress' {
         Test-Path (Join-Path $env:WPD_SITES_ROOT 'wp4') | Should -BeTrue
     }
 }
+
+# Opt-in: WPD_INTEGRATION=1 and a real .wpress under D:\laragon\www (read only, smallest one over 3 MB). Alternate ports, never touches Laragon.
+$script:realWpress = if ($env:WPD_INTEGRATION) { Get-ChildItem 'D:\laragon\www' -Recurse -Filter *.wpress -ErrorAction SilentlyContinue | Where-Object Length -gt 3MB | Sort-Object Length | Select-Object -First 1 }
+Describe 'Wpress real file (structure only)' -Tag Integration -Skip:(-not $script:realWpress) {
+    It 'expands a real archive' {
+        $d = Join-Path ([IO.Path]::GetTempPath()) "wpd-wpress-real-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+        try {
+            $r = Expand-Wpress $script:realWpress.FullName $d
+            Test-Path $r.DatabasePath | Should -BeTrue
+            $r.OldUrl | Should -Match '^https?://'
+            $r.FileCount | Should -BeGreaterThan 0
+        } finally { Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+Describe 'Import-Wpress integration (real Docker, alternate ports)' -Tag Integration -Skip:(-not $script:realWpress) {
+    BeforeAll {
+        $script:keep = @{}
+        foreach ($n in 'WPD_HOME', 'WPD_SITES_ROOT', 'WPD_HTTP_PORT', 'WPD_HTTPS_PORT', 'WPD_DNS_PORT', 'WPD_INFRA_PREFIX') { $script:keep[$n] = [Environment]::GetEnvironmentVariable($n) }
+        $script:tmp = Join-Path ([IO.Path]::GetTempPath()) "wpd wpress int $([guid]::NewGuid().ToString('N').Substring(0, 8))"
+        New-Item -ItemType Directory $script:tmp -Force | Out-Null
+        $env:WPD_HOME = Join-Path $script:tmp 'home'; $env:WPD_SITES_ROOT = Join-Path $script:tmp 'sites'
+        $env:WPD_HTTP_PORT = '8080'; $env:WPD_HTTPS_PORT = '8443'; $env:WPD_DNS_PORT = '5354'; $env:WPD_INFRA_PREFIX = 'wpdtest'
+    }
+    AfterAll {
+        $f = 'label=com.docker.compose.project=wpdtest-wpsite'
+        $c = & docker ps -a -q --filter $f; if ($c) { & docker rm -f -v @c *> $null }
+        $v = & docker volume ls -q --filter $f; if ($v) { & docker volume rm -f @v *> $null }
+        $n = & docker network ls -q --filter $f; if ($n) { & docker network rm @n *> $null }
+        foreach ($c in 'wpdtest-traefik', 'wpdtest-dns') { & docker rm -f $c *> $null }
+        & docker network rm wpdtest-net wpdtest_default *> $null
+        & docker rmi wpdtest-dns:local *> $null
+        Remove-Item $script:tmp -Recurse -Force -ErrorAction SilentlyContinue
+        foreach ($n in $script:keep.Keys) { [Environment]::SetEnvironmentVariable($n, $script:keep[$n]) }
+    }
+    It 'imports a real archive and serves it over https with no live url left' {
+        Initialize-Infra
+        $s = Import-Wpress -Name 'wpsite' -File $script:realWpress.FullName -NoUploads
+        $s.Name | Should -Be 'wpsite'
+        $code = & curl.exe --silent --show-error --ssl-no-revoke --resolve 'wpsite.test:8443:127.0.0.1' -o NUL -w '%{http_code}' 'https://wpsite.test:8443/'
+        $code | Should -Be '200'
+    }
+}
