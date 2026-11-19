@@ -6,6 +6,7 @@ x-wp-env: &wp-env
   WORDPRESS_DB_USER: wp
   WORDPRESS_DB_PASSWORD: "{{DbPassword}}"
   WORDPRESS_DB_NAME: wordpress
+  WPD_MAIL_HOST: {{Project}}-mail
   # wp-config.php (in the core volume) reads these at run time, so WP-CLI must get the same values as Apache.
   WORDPRESS_DEBUG: "1"
   WORDPRESS_CONFIG_EXTRA: |
@@ -81,7 +82,11 @@ services:
   mailpit:
     image: axllent/mailpit:v1.21.8
     restart: unless-stopped
-    networks: [default, web]
+    networks:
+      default:
+        aliases: [{{Project}}-mail]
+      web:
+        aliases: [{{Project}}-mail]
     labels:
       - traefik.enable=true
       - traefik.docker.network={{Network}}

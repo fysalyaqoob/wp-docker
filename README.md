@@ -12,7 +12,7 @@ Create new WordPress sites, or clone live ones, into Docker and serve them at `h
 ## Prerequisites
 
 - Docker Desktop (running).
-- PowerShell 7 (`pwsh`). Not Windows PowerShell 5.1.
+- PowerShell 7.3 or newer (`pwsh`). Not Windows PowerShell 5.1.
 - mkcert (`winget install FiloSottile.mkcert` on Windows, `brew install mkcert` on macOS). `wpd setup` installs it if missing.
 - git.
 
@@ -114,3 +114,5 @@ They use `WPD_HTTP_PORT=8080`, `WPD_HTTPS_PORT=8443`, `WPD_DNS_PORT=5354`, `WPD_
 ## License
 
 MIT, see `LICENSE`.
+
+Note: mail is routed to Mailpit by an mu-plugin hook that runs last. API-based mailers (Brevo, Mailgun API, SES API and similar) bypass it and are covered only by the deactivate list after a clone. WP-Cron is off, so scheduled jobs and scheduled posts do not fire.

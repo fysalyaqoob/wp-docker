@@ -15,6 +15,13 @@ easy-wp-smtp
 fluent-smtp
 sendgrid-email-delivery-simplified
 mailgun
+mailjet-for-wordpress
+sendinblue-woocommerce
+mailpoet
+postmark-approved-wordpress-plugin
+wp-ses
+smtp-mailer
+gmail-smtp
 
 # Email marketing
 mailchimp-for-wp

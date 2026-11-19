@@ -79,7 +79,9 @@ function wpd_sr($s, $pairs) {
     if ($s[$i] === "s" && preg_match("/\\Gs:(\\d+):\"/", $s, $m, 0, $i)) {
       $len = (int)$m[1]; $st = $i + strlen($m[0]);
       if (substr($s, $st + $len, 2) === "\";") {
-        $str = substr($s, $st, $len); foreach ($pairs as $p) { $str = str_replace($p[0], $p[1], $str); }
+        $str = substr($s, $st, $len);
+        if (preg_match('/^[aOsCbidN][:;]/', $str)) { $str = wpd_sr($str, $pairs); }
+        else { foreach ($pairs as $p) { $str = str_replace($p[0], $p[1], $str); } }
         $out .= "s:" . strlen($str) . ":\"" . $str . "\";"; $i = $st + $len + 2; continue;
       }
     }

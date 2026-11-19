@@ -43,6 +43,8 @@ function Expand-WpdTar {
     # bsdtar/GNU tar refuse absolute paths and ".." members by default; no -P is passed on purpose.
     $r = Invoke-WpdProcess -FilePath (Get-TarPath) -ArgumentList @('-xzf', $Archive, '-C', $Destination)
     if ($r.ExitCode -ne 0) { throw "Could not extract the downloaded wp-content archive: $("$($r.Stderr)".Trim())" }
+    $l = @(Get-ChildItem -LiteralPath $Destination -Recurse -Force | Where-Object LinkType)
+    if ($l) { Remove-Item -LiteralPath $Destination -Recurse -Force -ErrorAction SilentlyContinue; throw "Archive contains links (e.g. $($l[0].FullName)); refusing." }
 }
 
 function Get-SqlTablePrefix {

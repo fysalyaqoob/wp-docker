@@ -1,4 +1,5 @@
 #!/usr/bin/env pwsh
+#requires -Version 7.3
 param([Parameter(Position = 0)][string]$Command = 'help', [Parameter(ValueFromRemainingArguments)][string[]]$Rest)
 $ErrorActionPreference = 'Stop'
 foreach ($f in 'Platform', 'Config', 'Docker', 'Infra', 'Doctor', 'Site', 'Safety', 'CloneSsh', 'Wpress') { . (Join-Path $PSScriptRoot "lib/$f.ps1") }
@@ -87,6 +88,7 @@ switch ($Command) {
     }
     'clone' {
         $p = Read-CloneArgs $Rest
+        if ($p.Wpress -and $p.Ssh) { throw 'Use either --ssh or --wpress, not both.' }
         if ($p.Wpress) {
             if (-not $p.Name) { throw 'Usage: wpd clone <name> --wpress <file> [--old-url https://live.example.com] [--no-uploads]' }
             $s = Import-Wpress -Name $p.Name -File $p.Wpress -OldUrl $p.OldUrl -NoUploads:$p.NoUploads
