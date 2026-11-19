@@ -141,6 +141,19 @@ function Get-MkcertPath {
     $cands | Where-Object { Test-Path $_ } | Select-Object -First 1
 }
 
+function New-MkcertCertificate {
+    # One certificate whose SANs are exactly $Hosts (never a *.test wildcard: Windows rejects it). The CA must already be trusted.
+    param(
+        [Parameter(Mandatory)][string[]]$Hosts,
+        [Parameter(Mandatory)][string]$CertFile,
+        [Parameter(Mandatory)][string]$KeyFile
+    )
+    $mk = Get-MkcertPath
+    if (-not $mk) { throw "mkcert is not installed. Run 'wpd setup'." }
+    $out = & $mk -cert-file $CertFile -key-file $KeyFile @Hosts 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "mkcert failed (exit $LASTEXITCODE): $($out -join ' ')" }
+}
+
 function Install-Mkcert {
     if ($IsWindows) {
         & winget install --id FiloSottile.mkcert -e --accept-source-agreements --accept-package-agreements
