@@ -273,10 +273,10 @@ Describe 'Import-SiteContent (docker and WP-CLI mocked)' {
         Test-Path (Join-Path $site 'themes/mytheme/style.css') | Should -BeTrue
         Test-Path (Join-Path $site 'plugins/myplugin/myplugin.php') | Should -BeTrue
         $iConfig = $script:wp.FindIndex({ param($s) $s -like 'config set table_prefix zz_*' })
-        $iImport = $script:wp.FindIndex({ param($s) $s -like 'db import*' })
         $iConfig | Should -BeGreaterOrEqual 0
-        $iImport | Should -BeGreaterThan $iConfig
-        $script:wp[$iImport - 1] | Should -Be 'db clean --yes'
+        ($script:dk -join "`n") | Should -Match 'run --rm -T wpcli sh -c MYSQL_PWD=.*mysql --skip-ssl .*< wpd-import.sql'
+        # db clean needs the wp_ prefix still in place (WP-CLI refuses a site whose configured prefix has no tables).
+        $script:wp.FindIndex({ param($s) $s -like 'eval*DROP TABLE*' }) | Should -BeLessThan $iConfig
         ($script:cp -join "`n") | Should -Match 'cp .*uploads.*cid123:/var/www/html/wp-content/uploads/'
         ($script:dk -join "`n") | Should -Match 'chown -R www-data:www-data /var/www/html/wp-content/uploads'
         $script:safety | Should -Be 'imp|https://live.example.com'
@@ -341,9 +341,9 @@ Describe 'Import-SiteContent integration (real Docker, alternate ports)' -Tag In
         New-WpdSite 'srcsite' | Out-Null
         $live = 'live.example.com'
         # Source "live" site: other table prefix, a theme, a plugin, an upload, a post and an option carrying the live URL.
+        Clear-SiteDatabase 'srcsite'
         Invoke-SiteWpCli 'srcsite' @('config', 'set', 'table_prefix', 'zz_', '--type=variable') | Out-Null
-        Invoke-SiteWpCli 'srcsite' @('db', 'clean', '--yes') | Out-Null
-        Invoke-SiteWpCli 'srcsite' @('core', 'install', '--url=https://live.example.com', '--title=Live', '--admin_user=liveadmin', '--admin_password=Zx9-live-pass-1', '--admin_email=a@live.example.com', '--skip-email') | Out-Null
+        Invoke-SiteWpCli 'srcsite' @('core', 'install', '--url=https://live.example.com', '--title=Live', '--admin_user=liveadmin', '--admin_password=Zx9-live-pass-1', '--admin_email=a@example.org', '--skip-email') | Out-Null
         Invoke-SiteWpCli 'srcsite' @('post', 'create', '--post_title=Hello Live', '--post_status=publish', "--post_content=<a href=`"https://$live/p`">x</a>") | Out-Null
         Invoke-SiteWpCli 'srcsite' @('option', 'update', 'wpd_live_opt', "https://$live/x and //www.$live/y") | Out-Null
         $sc = Join-Path $env:WPD_SITES_ROOT 'srcsite/wp-content'
@@ -355,7 +355,7 @@ Describe 'Import-SiteContent integration (real Docker, alternate ports)' -Tag In
         New-Item -ItemType Directory (Join-Path $exp 'uploads/2024') -Force | Out-Null
         Copy-Item (Join-Path $sc 'themes') $exp -Recurse; Copy-Item (Join-Path $sc 'plugins') $exp -Recurse
         [IO.File]::WriteAllBytes((Join-Path $exp 'uploads/2024/live.bin'), [byte[]](0..255))
-        Invoke-SiteWpCli 'srcsite' @('db', 'export', 'wpd-export.sql', '--add-drop-table') | Out-Null
+        Invoke-SiteWpCli 'srcsite' @('db', 'export', 'wpd-export.sql', '--add-drop-table', '--skip-ssl') | Out-Null
         $cid = (Invoke-SiteCompose 'srcsite' @('ps', '-q', 'wordpress')) | Select-Object -First 1
         $sqlFile = Join-Path $script:tmp 'live.sql'
         Invoke-Docker @('cp', "${cid}:/var/www/html/wpd-export.sql", $sqlFile) | Out-Null
@@ -371,7 +371,7 @@ Describe 'Import-SiteContent integration (real Docker, alternate ports)' -Tag In
         Test-Path (Join-Path $dc 'mu-plugins/wpd-mail.php') | Should -BeTrue
         $up = (Invoke-SiteCompose 'dstsite' @('exec', '-T', 'wordpress', 'ls', '/var/www/html/wp-content/uploads/2024')) -join ' '
         $up | Should -Match 'live\.bin'
-        (Invoke-SiteWpCli 'dstsite' @('post', 'list', '--field=post_title') -join "`n") | Should -Match 'Hello Live'
+        ((Invoke-SiteWpCli 'dstsite' @('post', 'list', '--field=post_title')) -join "`n") | Should -Match 'Hello Live'
         (Invoke-SiteWpCli 'dstsite' @('config', 'get', 'table_prefix')) -join '' | Should -Be 'zz_'
         (Invoke-SiteWpCli 'dstsite' @('option', 'get', 'wpd_live_opt')) -join '' | Should -Be 'https://dstsite.test:8443/x and //dstsite.test:8443/y'
         (Invoke-SiteWpCli 'dstsite' @('db', 'search', $live, '--all-tables', '--table_column_once', '--one_line')) | Should -BeNullOrEmpty

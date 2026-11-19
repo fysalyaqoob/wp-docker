@@ -80,6 +80,15 @@ function Set-SiteAdminPassword {
     }
 }
 
+function Clear-SiteDatabase {
+    # Drops every table through wpdb. `wp db clean` is not used: it shells out to the mysql client, which in the
+    # wordpress:cli image insists on TLS that the MariaDB container does not offer (verified), and it refuses to run
+    # once the configured table prefix has no tables. Needs the configured prefix to still match the current tables.
+    param([Parameter(Mandatory)][string]$Name)
+    Invoke-SiteWpCli $Name @('eval', '--skip-plugins', '--skip-themes',
+        'global $wpdb; $wpdb->query("SET FOREIGN_KEY_CHECKS=0"); foreach ($wpdb->get_col("SHOW TABLES") as $t) { $wpdb->query("DROP TABLE IF EXISTS `$t`"); }') | Out-Null
+}
+
 function Import-SiteContent {
     # Puts live content into an existing, running wpd site. Independent of SSH (also used for .wpress).
     # ContentDir holds themes/, plugins/, mu-plugins/ and optionally uploads/ (WordPress core and wp-config.php are never
@@ -120,14 +129,18 @@ function Import-SiteContent {
     }
 
     # The live tables may use another prefix; WordPress must read the ones being imported.
-    if ($prefix -ne 'wp_') { Invoke-SiteWpCli $Name @('config', 'set', 'table_prefix', $prefix, '--type=variable') | Out-Null }
+    # Order matters: db clean only works while the configured prefix (wp_) still has tables, so clean first.
     Write-Host "Importing the database (table prefix $prefix)..."
+    Clear-SiteDatabase $Name
+    if ($prefix -ne 'wp_') { Invoke-SiteWpCli $Name @('config', 'set', 'table_prefix', $prefix, '--type=variable') | Out-Null }
     # /var/www/html is the core volume, shared with the WP-CLI container.
     Invoke-Docker @('cp', $SqlFile, "${cid}:/var/www/html/wpd-import.sql") | Out-Null
     try {
         Invoke-SiteCompose $Name @('exec', '-T', '-u', 'root', 'wordpress', 'chmod', '644', '/var/www/html/wpd-import.sql') | Out-Null
-        Invoke-SiteWpCli $Name @('db', 'clean', '--yes') | Out-Null
-        Invoke-SiteWpCli $Name @('db', 'import', 'wpd-import.sql') | Out-Null
+        # The mysql client directly, not `wp db import`: WP-CLI queries the server first without passing --skip-ssl and fails (verified).
+        # The password stays in the container's own environment (MYSQL_PWD), never in a host-side argument.
+        Invoke-SiteCompose $Name @('--profile', 'tools', 'run', '--rm', '-T', 'wpcli', 'sh', '-c',
+            'MYSQL_PWD="$WORDPRESS_DB_PASSWORD" mysql --skip-ssl -h "$WORDPRESS_DB_HOST" -u "$WORDPRESS_DB_USER" "$WORDPRESS_DB_NAME" < wpd-import.sql') | Out-Null
     } finally {
         try { Invoke-SiteCompose $Name @('exec', '-T', '-u', 'root', 'wordpress', 'rm', '-f', '/var/www/html/wpd-import.sql') | Out-Null } catch { Write-Warning "Could not delete the temporary dump in the container: $($_.Exception.Message)" }
     }
