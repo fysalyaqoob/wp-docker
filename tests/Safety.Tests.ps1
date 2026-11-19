@@ -60,7 +60,7 @@ Describe 'Get-UrlReplacements (escaped, encoded, validation)' {
         $s | Should -Match '//acme.test:8443/q'
     }
     It 'rejects malformed live URLs' {
-        foreach ($bad in 'ftp://x.com', 'not a url', 'https://', 'https://ex ample.com', 'javascript:alert(1)') {
+        foreach ($bad in 'ftp://x.com', 'not a url', 'https://', '//-x.com', 'https://-x.com', 'https://ex ample.com', 'javascript:alert(1)') {
             { Get-UrlReplacements $bad 'https://acme.test' } | Should -Throw '*Invalid live URL*'
         }
     }
@@ -78,13 +78,13 @@ Describe 'Set-CloneSafety' {
         New-Item -ItemType Directory (Join-Path $env:WPD_SITES_ROOT 'acme') -Force | Out-Null
         Set-Content (Join-Path $env:WPD_SITES_ROOT 'acme/docker-compose.yml') '# Rendered by wpd'
         $script:calls = [System.Collections.Generic.List[object]]::new()
-        $script:cronOn = $true; $script:active = 'akismet', 'wp-mail-smtp', 'wp-rocket'; $script:network = @(); $script:dbHits = @(); $script:failOn = $null
+        $script:cronOn = $true; $script:active = 'akismet', 'wp-mail-smtp', 'wp-rocket'; $script:network = @(); $script:urlHits = @(); $script:bareHits = @(); $script:failOn = $null
         Mock Invoke-SiteWpCli {
             $script:calls.Add($WpArgs)
             if ($script:failOn -and $WpArgs[0] -eq $script:failOn) { throw 'boom' }
             if ($WpArgs[0] -eq 'eval') { return $(if ($script:cronOn) { 'wpd-cron-off' } else { 'wpd-cron-on' }) }
             if ($WpArgs[0] -eq 'plugin' -and $WpArgs[1] -eq 'list') { return $(if ($WpArgs[2] -eq '--status=active') { $script:active } else { $script:network }) }
-            if ($WpArgs[0] -eq 'db' -and $WpArgs[1] -eq 'search') { return $script:dbHits }
+            if ($WpArgs[0] -eq 'db' -and $WpArgs[1] -eq 'search') { return $(if ($WpArgs[2] -eq 'live.example.com') { $script:bareHits } else { $script:urlHits }) }
         }
     }
     AfterEach {
@@ -135,17 +135,25 @@ Describe 'Set-CloneSafety' {
         Set-CloneSafety 'acme' 'https://live.example.com'
         ($script:calls | Where-Object { $_[1] -eq 'deactivate' } | ForEach-Object { $_ -join ' ' }) | Should -Be 'plugin deactivate --network wp-rocket'
     }
-    It 'searches the database for the bare live host and passes when nothing is found' {
+    It 'searches for URL-shaped forms of the bare host (no www) and then the bare host, and passes when nothing is found' {
         Set-CloneSafety 'acme' 'https://www.Live.example.com/'
-        $q = @($script:calls | Where-Object { $_[0] -eq 'db' })
-        $q.Count | Should -Be 1
-        $q[0][2] | Should -Be 'live.example.com'
-        $q[0] | Should -Contain '--all-tables'
+        $q = @($script:calls | Where-Object { $_[0] -eq 'db' } | ForEach-Object { $_[2] })
+        $q | Should -Be @('//live.example.com', '\/\/live.example.com', '%2F%2Flive.example.com', 'live.example.com')
+        $script:calls | Where-Object { $_[0] -eq 'db' } | ForEach-Object { $_ | Should -Contain '--all-tables' }
     }
-    It 'throws listing tables when the live host is still present, after applying the other defaults' {
-        $script:dbHits = @('wp_posts:post_content', 'wp_options:option_value')
+    It 'throws listing tables when a URL-shaped live host remains, after applying the other defaults' {
+        $script:urlHits = @('wp_posts:post_content', 'wp_options:option_value')
         { Set-CloneSafety 'acme' 'https://live.example.com' } | Should -Throw '*still present*wp_posts:post_content*'
         $script:calls | Where-Object { $_[0] -eq 'option' } | Should -Not -BeNullOrEmpty
+    }
+    It 'only warns (no throw) when the bare host remains, capped at 20 lines' {
+        $script:bareHits = 1..25 | ForEach-Object { "wp_users:user_email$_" }
+        { Set-CloneSafety 'acme' 'https://live.example.com' -WarningVariable w -WarningAction SilentlyContinue } | Should -Not -Throw
+        Set-CloneSafety 'acme' 'https://live.example.com' -WarningVariable w -WarningAction SilentlyContinue
+        $w.Count | Should -Be 1
+        "$($w[0])" | Should -Match 'email'
+        "$($w[0])" | Should -Match 'and 5 more'
+        "$($w[0])" | Should -Not -Match 'user_email21'
     }
     It 'checks cron with plugins and themes skipped' {
         Set-CloneSafety 'acme' 'https://live.example.com'
@@ -204,7 +212,12 @@ Describe 'Clone safety integration (real Docker, alternate ports)' -Tag Integrat
         $php = '$id = wp_insert_post(["post_title"=>"t","post_status"=>"publish"]); $j = json_encode(["u"=>"https://live.example.com/a.jpg","w"=>"http://www.live.example.com/b","r"=>"//live.example.com/c"]); update_post_meta($id, "_elementor_data", $j); update_option("wpd_json", $j); update_option("wpd_jsonser", ["k"=>$j, "n"=>[1,2]]); echo $id;'
         Invoke-SiteWpCli 'safe' @('eval', $php) | Out-Null
 
-        Set-CloneSafety 'safe' "https://$live"
+        Invoke-SiteWpCli 'safe' @('option', 'update', 'admin_email', "info@$live") | Out-Null
+        Invoke-SiteWpCli 'safe' @('user', 'update', '1', "--user_email=info@$live") | Out-Null
+
+        Set-CloneSafety 'safe' "https://$live" -WarningVariable warn -WarningAction SilentlyContinue
+        "$warn" | Should -Match 'user_email|admin_email|wp_users|wp_options'
+        "$warn" | Should -Match 'email'
 
         $chk = '$p = get_posts(["numberposts"=>1,"post_status"=>"publish","orderby"=>"ID","order"=>"DESC"])[0]; $m = get_post_meta($p->ID, "_elementor_data", true); $o = get_option("wpd_jsonser"); echo json_encode([json_decode($m, true)["u"], json_decode(get_option("wpd_json"), true)["w"], json_decode($o["k"], true)["r"], is_array($o) && $o["n"] === [1,2], strpos($m . get_option("wpd_json") . $o["k"], "live.example") === false]);'
         $r = (Invoke-SiteWpCli 'safe' @('eval', $chk)) -join '' | ConvertFrom-Json
@@ -224,10 +237,10 @@ Describe 'Clone safety integration (real Docker, alternate ports)' -Tag Integrat
         $active | Should -Contain 'harmless-one'
         Test-Path (Join-Path $plug 'wp-mail-smtp') | Should -BeTrue
     }
-    It 'throws and names the table when the live host remains in a form the tool does not cover' {
-        Invoke-SiteWpCli 'safe' @('option', 'update', 'wpd_bare', 'contact us at live.example.com today') | Out-Null
-        { Set-CloneSafety 'safe' 'https://live.example.com' } | Should -Throw '*still present*wp_options*'
-        Invoke-SiteWpCli 'safe' @('option', 'delete', 'wpd_bare') | Out-Null
-        { Set-CloneSafety 'safe' 'https://live.example.com' } | Should -Not -Throw
+    It 'throws and names the table when a URL-shaped live host survives (upper-case scheme and host: the replacements are case-sensitive)' {
+        Invoke-SiteWpCli 'safe' @('option', 'update', 'wpd_upper', 'see HTTPS://LIVE.EXAMPLE.COM/x') | Out-Null
+        { Set-CloneSafety 'safe' 'https://live.example.com' -WarningAction SilentlyContinue } | Should -Throw '*still present*wp_options*'
+        Invoke-SiteWpCli 'safe' @('option', 'delete', 'wpd_upper') | Out-Null
+        { Set-CloneSafety 'safe' 'https://live.example.com' -WarningAction SilentlyContinue } | Should -Not -Throw
     }
 }

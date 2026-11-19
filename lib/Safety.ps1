@@ -11,7 +11,7 @@ function Get-UrlReplacements {
     # double-escaped (\/) and other encodings are not covered, the final host check catches leftovers.
     param([Parameter(Mandatory)][string]$OldUrl, [Parameter(Mandatory)][string]$NewUrl)
     $u = $OldUrl.Trim()
-    if ($u -notmatch '^(https?:)?//?[a-z0-9.-]+(:\d+)?(/.*)?$') { throw "Invalid live URL '$OldUrl'. Use something like https://www.example.com (letters, digits, dots, hyphens, optional port and path)." }
+    if ($u -notmatch '^(https?:)?//?[a-z0-9][a-z0-9.-]*(:\d+)?(/.*)?$') { throw "Invalid live URL '$OldUrl'. Use something like https://www.example.com (letters, digits, dots, hyphens, optional port and path)." }
     $old = $u -replace '^(https?:)?//?', ''
     $slash = $old.IndexOf('/')
     $old = if ($slash -ge 0) { $old.Substring(0, $slash).ToLowerInvariant() + $old.Substring($slash) } else { $old.ToLowerInvariant() }
@@ -31,16 +31,34 @@ function Get-UrlReplacements {
     $pairs
 }
 
+function Search-WpdDb {
+    # table:column lines (plus matched text) for a literal search over all tables; case-insensitive per column collation.
+    param([string]$Name, [string]$Pattern)
+    @(Invoke-SiteWpCli $Name @('db', 'search', $Pattern, '--all-tables', '--table_column_once', '--one_line', '--before_context=0', '--after_context=0') |
+        ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+}
+
 function Assert-NoLiveHost {
-    # Anti-goal check: no table may still contain the live host (any form: plain, escaped, encoded, host alone).
+    # Two tiers. THROW: a URL-shaped leftover (//host, \/\/host, %2F%2Fhost) means a live URL survived the replacements.
+    # WARN: the bare host elsewhere (emails such as info@host, SMTP/SEO sender options) is normal and left untouched.
+    # Neither can match the local URL (different host). wp db search scans every table: slow on very large databases.
     param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$OldUrl)
     $h = ($OldUrl.Trim() -replace '^(https?:)?//?', '') -replace '[/:].*$', ''
     $h = ($h.ToLowerInvariant() -replace '^www\.', '')
-    $out = @(Invoke-SiteWpCli $Name @('db', 'search', $h, '--all-tables', '--table_column_once', '--one_line', '--before_context=0', '--after_context=0') |
-        ForEach-Object { "$_".Trim() } | Where-Object { $_ })
-    if ($out) {
-        $shown = ($out | Select-Object -First 15) -join "`n  "
-        throw "The live host '$h' is still present in the database after URL replacement (forms the tool does not cover). Tables and columns found:`n  $shown"
+    Write-Host "Checking the database for leftover live URLs ($h); this scans every table and can take a while on large sites..."
+    $urlHits = @()
+    foreach ($pat in "//$h", "\/\/$h", "%2F%2F$h") { $urlHits += Search-WpdDb $Name $pat }
+    if ($urlHits) {
+        $shown = ($urlHits | Select-Object -First 20) -join "`n  "
+        throw ("A live URL for '$h' is still present after URL replacement. The rest of the clone safety defaults were applied and the site is otherwise safe.`n" +
+            "Found in (table:column):`n  $shown`n" +
+            "Likely cause: an escaped or encoded form the tool does not cover (upper-case host, double-escaped slashes). Inspect with: wpd-style WP-CLI 'wp db search //$h --all-tables', then fix with 'wp search-replace <old> <new> --all-tables --precise'.")
+    }
+    $bare = @(Search-WpdDb $Name $h)
+    if ($bare) {
+        $shown = ($bare | Select-Object -First 20) -join "`n  "
+        $more = if ($bare.Count -gt 20) { "`n  ...and $($bare.Count - 20) more" } else { '' }
+        Write-Warning "The text '$h' still appears in the database, but not as a URL (usually email addresses). It was left untouched on purpose. Found in (table:column):`n  $shown$more"
     }
 }
 
