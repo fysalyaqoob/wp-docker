@@ -198,3 +198,49 @@ function Register-TestDns {
     }
     if (-not (Test-TestDns)) { throw 'The .test DNS hook was not created. Re-run wpd setup and approve the elevation prompt.' }
 }
+
+function Get-TarPath {
+    # Windows: the built-in bsdtar. A GNU tar earlier on PATH (Git for Windows) reads "C:\x" as a remote host.
+    if ($IsWindows) {
+        $t = Join-Path $env:SystemRoot 'System32\tar.exe'
+        if (Test-Path -LiteralPath $t) { return $t }
+    }
+    'tar'
+}
+
+function Invoke-WpdProcess {
+    # Runs an external program without a shell (each argument is passed as-is, nothing is re-parsed) and without the
+    # PowerShell pipeline, which would re-encode binary output. With -OutFile, stdout streams to that file byte for byte.
+    # Stdin is closed immediately so the program can never wait on (or read) the caller's input.
+    # Returns @{ ExitCode; Stdout (empty when -OutFile is used); Stderr }.
+    param(
+        [Parameter(Mandatory)][string]$FilePath,
+        [string[]]$ArgumentList = @(),
+        [string]$OutFile,
+        [string]$WorkingDirectory
+    )
+    $exe = Get-Command $FilePath -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $exe) { throw "'$FilePath' was not found on this computer. Install it (Windows: Settings > Optional features > OpenSSH Client; macOS has it built in)." }
+    $psi = [Diagnostics.ProcessStartInfo]::new($exe.Source)
+    foreach ($a in $ArgumentList) { $psi.ArgumentList.Add($a) }
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+    if ($WorkingDirectory) { $psi.WorkingDirectory = $WorkingDirectory }
+    $p = [Diagnostics.Process]::new()
+    $p.StartInfo = $psi
+    [void]$p.Start()
+    try {
+        $p.StandardInput.Close()
+        $errTask = $p.StandardError.ReadToEndAsync()
+        $stdout = ''
+        if ($OutFile) {
+            $fs = [IO.File]::Create($OutFile)
+            try { $p.StandardOutput.BaseStream.CopyTo($fs) } finally { $fs.Dispose() }
+        } else { $stdout = $p.StandardOutput.ReadToEnd() }
+        $p.WaitForExit()
+        [pscustomobject]@{ ExitCode = $p.ExitCode; Stdout = $stdout; Stderr = $errTask.GetAwaiter().GetResult() }
+    } finally {
+        if (-not $p.HasExited) { try { $p.Kill($true) } catch { } }
+        $p.Dispose()
+    }
+}
