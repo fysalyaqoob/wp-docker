@@ -43,4 +43,8 @@ function Assert-SiteName {
     if ($Name -cnotmatch '^[a-z0-9]([a-z0-9-]{0,40}[a-z0-9])?\z') {
         throw "Invalid site name '$Name'. Use 1-42 lowercase letters, digits or hyphens, starting and ending with a letter or digit (no spaces, dots, uppercase or path characters)."
     }
+    # Windows device names are unusable as folder names there; reject everywhere so a site is portable.
+    if ($Name -match '^(con|prn|aux|nul|com[1-9]|lpt[1-9])\z') {
+        throw "Invalid site name '$Name': it is a reserved Windows device name. Pick another name."
+    }
 }

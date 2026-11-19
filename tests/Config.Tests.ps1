@@ -68,6 +68,12 @@ Describe 'Assert-SiteName' {
     It 'rejects <_>' -ForEach 'Acme', 'a b', 'a.b', '..\x', '', ('a' * 43), '-a', 'a-' {
         { Assert-SiteName $_ } | Should -Throw
     }
+    It 'rejects reserved Windows device name <_>' -ForEach 'con', 'prn', 'aux', 'nul', 'com1', 'com9', 'lpt1', 'lpt9' {
+        { Assert-SiteName $_ } | Should -Throw '*reserved*'
+    }
+    It 'still accepts names that merely contain a device name' -ForEach 'console', 'com10', 'lpt0', 'auxx', 'my-con' {
+        { Assert-SiteName $_ } | Should -Not -Throw
+    }
     It 'rejects a trailing newline' {
         { Assert-SiteName "acme`n" } | Should -Throw
     }

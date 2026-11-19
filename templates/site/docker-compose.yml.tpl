@@ -55,15 +55,15 @@ services:
     labels:
       - traefik.enable=true
       - traefik.docker.network={{Network}}
-      - "traefik.http.routers.{{Project}}.rule=Host(`{{Name}}.{{Tld}}`)"
-      - traefik.http.routers.{{Project}}.entrypoints=websecure
-      - traefik.http.routers.{{Project}}.tls=true
-      - "traefik.http.routers.{{Project}}-http.rule=Host(`{{Name}}.{{Tld}}`)"
-      - traefik.http.routers.{{Project}}-http.entrypoints=web
-      - traefik.http.routers.{{Project}}-http.middlewares={{Project}}-https
-      - traefik.http.middlewares.{{Project}}-https.redirectscheme.scheme=https
-      - traefik.http.middlewares.{{Project}}-https.redirectscheme.port={{HttpsPort}}
-      - traefik.http.services.{{Project}}.loadbalancer.server.port=80
+      - "traefik.http.routers.{{Project}}_wp.rule=Host(`{{Name}}.{{Tld}}`)"
+      - traefik.http.routers.{{Project}}_wp.entrypoints=websecure
+      - traefik.http.routers.{{Project}}_wp.tls=true
+      - "traefik.http.routers.{{Project}}_http.rule=Host(`{{Name}}.{{Tld}}`)"
+      - traefik.http.routers.{{Project}}_http.entrypoints=web
+      - traefik.http.routers.{{Project}}_http.middlewares={{Project}}_https
+      - traefik.http.middlewares.{{Project}}_https.redirectscheme.scheme=https
+      - traefik.http.middlewares.{{Project}}_https.redirectscheme.port={{HttpsPort}}
+      - traefik.http.services.{{Project}}_wp.loadbalancer.server.port=80
 
   # Run on demand: docker compose run --rm wpcli wp <command>
   wpcli:
@@ -79,16 +79,16 @@ services:
     networks: [default]
 
   mailpit:
-    image: axllent/mailpit:latest
+    image: axllent/mailpit:v1.21.8
     restart: unless-stopped
     networks: [default, web]
     labels:
       - traefik.enable=true
       - traefik.docker.network={{Network}}
-      - "traefik.http.routers.{{Project}}-mail.rule=Host(`mail.{{Name}}.{{Tld}}`)"
-      - traefik.http.routers.{{Project}}-mail.entrypoints=websecure
-      - traefik.http.routers.{{Project}}-mail.tls=true
-      - traefik.http.services.{{Project}}-mail.loadbalancer.server.port=8025
+      - "traefik.http.routers.{{Project}}_mail.rule=Host(`mail.{{Name}}.{{Tld}}`)"
+      - traefik.http.routers.{{Project}}_mail.entrypoints=websecure
+      - traefik.http.routers.{{Project}}_mail.tls=true
+      - traefik.http.services.{{Project}}_mail.loadbalancer.server.port=8025
 
 volumes:
   core:

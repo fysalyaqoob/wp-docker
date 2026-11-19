@@ -89,7 +89,7 @@ function Update-TraefikCerts {
 
 function Remove-SiteFiles {
     # Deletes <SitesRoot>/<name> and this site's cert files, nothing else.
-    param([Parameter(Mandatory)][string]$Name)
+    param([Parameter(Mandatory)][string]$Name, [switch]$RequireMarker)
     Assert-SiteName $Name
     $c = Get-WpdConfig
     $root = [IO.Path]::GetFullPath($c.SitesRoot).TrimEnd('\', '/')
@@ -98,7 +98,19 @@ function Remove-SiteFiles {
         throw "Refusing to delete '$dir': it is not inside the sites root."
     }
     foreach ($f in Get-SiteCertFiles $Name) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
-    if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction Stop }
+    if (-not (Test-Path -LiteralPath $dir)) { return }
+    if ($RequireMarker -and -not (Test-WpdSiteFolder $dir)) {
+        Write-Warning "The folder $dir is not a wpd site (no compose file rendered by wpd), so it was left alone."
+        return
+    }
+    Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction Stop
+}
+
+function Test-WpdSiteFolder {
+    # A folder is ours only if its compose file carries the header wpd renders into it.
+    param([Parameter(Mandatory)][string]$Dir)
+    $f = Join-Path $Dir 'docker-compose.yml'
+    (Test-Path -LiteralPath $f -PathType Leaf) -and [bool](Select-String -LiteralPath $f -Pattern 'Rendered by wpd' -SimpleMatch -List)
 }
 
 function Assert-SiteExists {
@@ -118,6 +130,7 @@ function New-WpdSite {
         throw "Shared network '$($c.Network)' not found. Run 'wpd setup' first."
     }
     if (-not (Get-MkcertPath)) { throw "mkcert is not installed. Run 'wpd setup'." }
+    if (-not (Test-MkcertTrusted)) { throw "The mkcert local CA is not trusted yet (a certificate made now would not be trusted by your browser). Run 'wpd setup' first." }
 
     $dir = Join-Path $c.SitesRoot $Name
     $found = @()
@@ -131,6 +144,7 @@ function New-WpdSite {
     $dbPassword = New-RandomPassword
     $adminPassword = New-RandomPassword
     $url = Get-SiteUrl $Name
+    $succeeded = $false; $certWritten = $false
     try {
         Write-Host "Creating $Name ($url, PHP $Php)..."
         New-Item -ItemType Directory $dir -Force -ErrorAction Stop | Out-Null
@@ -146,6 +160,7 @@ function New-WpdSite {
         # Per-site certificate (site name and mail host as SANs) in Traefik's watched folders.
         foreach ($sub in 'certs', 'dynamic') { New-Item -ItemType Directory (Join-Path $c.InfraRoot $sub) -Force | Out-Null }
         $cert, $key, $dyn = Get-SiteCertFiles $Name
+        $certWritten = $true
         New-MkcertCertificate -Hosts @("$Name.$($c.Tld)", "mail.$Name.$($c.Tld)") -CertFile $cert -KeyFile $key
         Write-SiteFile $dyn "tls:`n  certificates:`n    - certFile: /certs/$Name.pem`n      keyFile: /certs/$Name-key.pem`n"
         try { Update-TraefikCerts } catch { throw "Could not reload Traefik ($($_.Exception.Message)). Run 'wpd setup' and try again." }
@@ -165,8 +180,14 @@ function New-WpdSite {
         Invoke-SiteCompose $Name @('exec', '-T', '-u', 'root', 'wordpress', 'chown', 'www-data:www-data', '/var/www/html/wp-content/uploads') | Out-Null
 
         Write-Host 'Installing WordPress...'
-        Invoke-SiteWpCli $Name @('core', 'install', "--url=$url", "--title=$Name", '--admin_user=admin',
-            "--admin_password=$adminPassword", "--admin_email=admin@$Name.$($c.Tld)", '--skip-email') | Out-Null
+        # The admin password travels as an environment variable (docker copies it from this process's environment),
+        # so it never appears in docker.exe's argument list.
+        $env:WPD_ADMIN_PW = $adminPassword
+        try {
+            Invoke-SiteCompose $Name @('--profile', 'tools', 'run', '--rm', '-T', '-e', 'WPD_ADMIN_PW', 'wpcli', 'sh', '-c',
+                'wp core install --url="$1" --title="$2" --admin_user=admin --admin_password="$WPD_ADMIN_PW" --admin_email="$3" --skip-email',
+                'sh', $url, $Name, "admin@$Name.$($c.Tld)") | Out-Null
+        } finally { Remove-Item Env:WPD_ADMIN_PW -ErrorAction SilentlyContinue }
         try { Invoke-SiteWpCli $Name @('rewrite', 'structure', '/%postname%/', '--hard') | Out-Null }
         catch { Write-Warning "Pretty permalinks were not enabled: $($_.Exception.Message)" }
 
@@ -174,12 +195,22 @@ function New-WpdSite {
             "Site: $url", "Mail: $(Get-SiteUrl $Name 'mail.')", "Admin URL: $url/wp-admin/",
             'Admin user: admin', "Admin password: $adminPassword",
             'DB name: wordpress', 'DB user: wp', "DB password: $dbPassword") -join "`n")
+        $succeeded = $true
     } catch {
-        $err = $_
-        Write-Warning "Creating '$Name' failed; removing what was created."
-        try { Remove-SiteDockerObjects $Name } catch { Write-Warning "Docker cleanup incomplete: $($_.Exception.Message)" }
-        try { Remove-SiteFiles $Name } catch { Write-Warning "File cleanup incomplete: $($_.Exception.Message)" }
-        throw $err
+        # Never let a password reach an error message.
+        $msg = $_.Exception.Message
+        foreach ($pw in $dbPassword, $adminPassword) { $msg = $msg.Replace($pw, '***') }
+        if ($msg -ne $_.Exception.Message) { throw $msg }
+        throw
+    } finally {
+        # finally (not catch) so Ctrl+C is cleaned up too. Everything here was created by this call:
+        # the pre-check above guarantees no folder, containers, volumes or certs existed before.
+        if (-not $succeeded) {
+            Write-Warning "Creating '$Name' did not finish; removing what was created."
+            try { Remove-SiteDockerObjects $Name } catch { Write-Warning "Docker cleanup incomplete: $($_.Exception.Message)" }
+            try { Remove-SiteFiles $Name } catch { Write-Warning "File cleanup incomplete: $($_.Exception.Message)" }
+            if ($certWritten) { try { Update-TraefikCerts } catch { Write-Warning "Could not reload Traefik: $($_.Exception.Message)" } }
+        }
     }
     [pscustomobject]@{ Name = $Name; Url = $url; Path = $dir; AdminUser = 'admin'; AdminPassword = $adminPassword }
 }
@@ -223,13 +254,16 @@ function Remove-WpdSite {
     $o = Get-SiteDockerObjects $Name
     $certs = @(Get-SiteCertFiles $Name | Where-Object { Test-Path -LiteralPath $_ })
     if (-not (Test-Path -LiteralPath $dir) -and -not $o.Containers -and -not $o.Volumes -and -not $certs) { throw "No site named '$Name'." }
+    $folderNote = if (-not (Test-Path -LiteralPath $dir)) { 'there is no site folder' }
+        elseif (Test-WpdSiteFolder $dir) { "the folder $dir including your themes, plugins and mu-plugins" }
+        else { "Note: the folder $dir is NOT a wpd site, so it will be left alone" }
     if (-not $Force) {
-        $q = "This will permanently delete site '$Name': its containers ($($o.Containers.Count)), its Docker volumes (WordPress core, uploads and the database: $($o.Volumes.Count)), its certificate files and the folder $dir including your themes, plugins and mu-plugins. This cannot be undone. Type y to delete [y/N]"
+        $q = "This will permanently delete site '$Name': its containers ($($o.Containers.Count)), its Docker volumes (WordPress core, uploads and the database: $($o.Volumes.Count)), its certificate files and $folderNote. This cannot be undone. Type y to delete [y/N]"
         $answer = try { & $Ask $q } catch { '' }
         if ($answer -notmatch '^\s*(y|yes)\s*$') { throw "Cancelled. Nothing was deleted." }
     }
     Remove-SiteDockerObjects $Name
-    Remove-SiteFiles $Name
+    Remove-SiteFiles $Name -RequireMarker
     if ($certs) { try { Update-TraefikCerts } catch { Write-Warning "Could not reload Traefik: $($_.Exception.Message)" } }
     Write-Host "Removed $Name."
 }

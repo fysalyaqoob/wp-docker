@@ -40,6 +40,34 @@ Describe 'Format-SiteCompose' {
         $o | Should -Match "WP_HOME', 'https://acme.test:8443'"
         $o | Should -Match 'redirectscheme.port=8443'
     }
+    It 'gives every Traefik router, service and middleware a name no other site can produce' {
+        # Names are read from the label keys and values of the rendered file. Site names cannot contain "_",
+        # so <project>_wp / _http / _https / _mail cannot equal another site's <project>.
+        $names = {
+            param($n)
+            $y = Format-SiteCompose @{ Name = $n; Tld = 'test'; Php = '8.3'; DbPassword = 'x'; Project = "wpd-$n" }
+            $set = [System.Collections.Generic.HashSet[string]]::new()
+            foreach ($m in [regex]::Matches($y, 'traefik\.http\.(routers|services|middlewares)\.([^.=]+)\.')) { [void]$set.Add("$($m.Groups[1].Value):$($m.Groups[2].Value)") }
+            foreach ($m in [regex]::Matches($y, 'routers\.[^.=]+\.middlewares=(\S+)')) { [void]$set.Add("middlewares:$($m.Groups[1].Value)") }
+            , $set
+        }
+        $sites = 'foo', 'foo-mail', 'foo-http', 'foo-https', 'foo-wp'
+        $all = @{}
+        foreach ($s in $sites) {
+            $set = & $names $s
+            $set.Count | Should -BeGreaterOrEqual 6
+            foreach ($k in $set) {
+                if ($all.ContainsKey($k)) { throw "Traefik name '$k' is used by both '$($all[$k])' and '$s'" }
+                $all[$k] = $s
+            }
+        }
+        $all.Keys | Should -Contain 'routers:wpd-foo_mail'
+        $all.Keys | Should -Contain 'routers:wpd-foo-mail_wp'
+    }
+    It 'pins the Mailpit image' {
+        $script:out | Should -Match 'axllent/mailpit:v\d+\.\d+\.\d+'
+        $script:out | Should -Not -Match ':latest'
+    }
     It 'throws when a required variable is missing' {
         { Format-SiteCompose @{ Name = 'acme'; Tld = 'test'; Php = '8.3' } } | Should -Throw '*DbPassword*'
     }
@@ -64,6 +92,8 @@ Describe 'site lifecycle (unit, Docker and mkcert mocked)' {
         Mock Assert-DockerRunning {}
         Mock Start-Sleep {}
         Mock Get-MkcertPath { 'mkcert-stub' }
+        Mock Test-MkcertTrusted { $true }
+        $script:stopWith = $null; $script:leakEnv = $false; $script:pwSeen = $null
         Mock New-MkcertCertificate {
             Set-Content -LiteralPath $CertFile -Value 'CERT'; Set-Content -LiteralPath $KeyFile -Value 'KEY'
             $script:certHosts = $Hosts
@@ -71,7 +101,16 @@ Describe 'site lifecycle (unit, Docker and mkcert mocked)' {
         Mock Invoke-Docker {
             $a = $DockerArgs -join ' '
             $script:calls.Add($a)
-            if ($script:failOn -and $a -like $script:failOn) { throw 'simulated docker failure' }
+            if ($a -like '*core install*') { $script:pwSeen = $env:WPD_ADMIN_PW }
+            if ($script:failOn -and $a -like $script:failOn) {
+                if ($script:stopWith) { throw $script:stopWith }
+                # Worst case: a docker error that echoes the environment and the compose file.
+                if ($script:leakEnv) {
+                    $compose = Get-Content (Join-Path $env:WPD_SITES_ROOT 'smoke/docker-compose.yml') -Raw
+                    throw "simulated docker failure env=$($env:WPD_ADMIN_PW) compose=$compose"
+                }
+                throw 'simulated docker failure'
+            }
             if ($a -like 'network ls*') { return 'wpdtest-net' }
             if ($a -like 'ps -a -q*' -or $a -like 'ps -q*') { return $script:psOutput }
             @()
@@ -153,6 +192,70 @@ Describe 'site lifecycle (unit, Docker and mkcert mocked)' {
             Test-Path (Join-Path $env:WPD_HOME 'infra/dynamic/smoke.yml') | Should -BeFalse
             ($script:calls | Where-Object { $_ -match 'volume ls' }) | Should -Not -BeNullOrEmpty
         }
+        It 'refuses when the mkcert CA is not trusted yet, creating nothing' {
+            Mock Test-MkcertTrusted { $false }
+            { New-WpdSite smoke } | Should -Throw '*wpd setup*'
+            Test-Path (Join-Path $env:WPD_SITES_ROOT 'smoke') | Should -BeFalse
+            Should -Invoke New-MkcertCertificate -Times 0 -Exactly
+        }
+        It 'passes the admin password by environment, never in docker arguments, and clears it afterwards' {
+            $r = New-WpdSite smoke
+            $script:pwSeen | Should -Be $r.AdminPassword
+            ($script:calls | Where-Object { $_ -match [regex]::Escape($r.AdminPassword) }) | Should -BeNullOrEmpty
+            ($script:calls | Where-Object { $_ -match 'core install' -and $_ -match '-e WPD_ADMIN_PW' }) | Should -HaveCount 1
+            $env:WPD_ADMIN_PW | Should -BeNullOrEmpty
+        }
+        It 'error messages contain neither the admin nor the DB password' {
+            $script:failOn = '*core install*'; $script:leakEnv = $true
+            $msg = try { New-WpdSite smoke; '' } catch { $_.Exception.Message }
+            $msg | Should -Match 'simulated docker failure'
+            $msg | Should -Match '\*\*\*'
+            $msg | Should -Not -Match 'env=\w{20}'
+            $msg | Should -Not -Match 'WORDPRESS_DB_PASSWORD: "\w{20}'
+            $env:WPD_ADMIN_PW | Should -BeNullOrEmpty
+        }
+        It 'cleans up on a terminating stop (Ctrl+C), including Traefik reload' {
+            # A real PipelineStoppedException cannot be thrown inside Pester (it aborts the run), so New-WpdSite runs in
+            # its own runspace with stubbed Docker/mkcert, and a stub throws the stop exactly like Ctrl+C does there.
+            # The stop skips `catch` blocks; only `finally` runs.
+            $log = Join-Path $script:tmp 'stop-calls.log'
+            $libs = 'Platform', 'Config', 'Docker', 'Infra', 'Site' | ForEach-Object { (Resolve-Path "$PSScriptRoot/../lib/$_.ps1").Path }
+            $ps = [powershell]::Create()
+            [void]$ps.AddScript({
+                param($libs, $log)
+                foreach ($l in $libs) { . $l }
+                function Assert-DockerRunning {}
+                function Get-MkcertPath { 'stub' }
+                function Test-MkcertTrusted { $true }
+                function New-MkcertCertificate { param($Hosts, $CertFile, $KeyFile) Set-Content $CertFile 'C'; Set-Content $KeyFile 'K' }
+                function Start-Sleep {}
+                function Invoke-Docker {
+                    param([string[]]$DockerArgs)
+                    $a = $DockerArgs -join ' '
+                    Add-Content $log $a
+                    if ($a -like 'network ls --filter name*') { return 'wpdtest-net' }
+                    if ($a -like '*core install*') { throw [System.Management.Automation.PipelineStoppedException]::new() }
+                    @()
+                }
+                New-WpdSite smoke
+            }).AddArgument($libs).AddArgument($log)
+            try { $ps.Invoke() 3>$null 6>$null } catch { }
+            $ps.Dispose()
+            $calls = Get-Content $log
+            ($calls | Where-Object { $_ -match 'core install' }) | Should -Not -BeNullOrEmpty -Because 'the stop must have happened mid-creation'
+            Test-Path (Join-Path $env:WPD_SITES_ROOT 'smoke') | Should -BeFalse
+            Test-Path (Join-Path $env:WPD_HOME 'infra/certs/smoke.pem') | Should -BeFalse
+            Test-Path (Join-Path $env:WPD_HOME 'infra/dynamic/smoke.yml') | Should -BeFalse
+            ($calls | Where-Object { $_ -match 'volume ls' }) | Should -Not -BeNullOrEmpty
+            ($calls | Where-Object { $_ -eq 'restart wpdtest-traefik' }).Count | Should -BeGreaterOrEqual 2
+        }
+        It 'a failed attempt never removes a pre-existing folder' {
+            $dir = Join-Path $env:WPD_SITES_ROOT 'smoke'
+            New-Item -ItemType Directory $dir | Out-Null
+            Set-Content (Join-Path $dir 'mine.txt') 'x'
+            { New-WpdSite smoke } | Should -Throw '*already exists*'
+            Test-Path (Join-Path $dir 'mine.txt') | Should -BeTrue
+        }
         It 'cleans up when WordPress install fails' {
             $script:failOn = '*core install*'
             { New-WpdSite smoke } | Should -Throw '*simulated docker failure*'
@@ -165,7 +268,7 @@ Describe 'site lifecycle (unit, Docker and mkcert mocked)' {
         BeforeEach {
             $script:dir = Join-Path $env:WPD_SITES_ROOT 'acme'
             New-Item -ItemType Directory (Join-Path $script:dir 'wp-content') -Force | Out-Null
-            Set-Content (Join-Path $script:dir 'docker-compose.yml') 'x'
+            Set-Content (Join-Path $script:dir 'docker-compose.yml') '# Rendered by wpd from templates/site/docker-compose.yml.tpl.'
             $other = Join-Path $env:WPD_SITES_ROOT 'other'
             New-Item -ItemType Directory $other | Out-Null
             Set-Content (Join-Path $other 'f.txt') 'other site'
@@ -209,6 +312,31 @@ Describe 'site lifecycle (unit, Docker and mkcert mocked)' {
             $script:psOutput = @('c1')
             Remove-WpdSite acme -Force
             ($script:calls | Where-Object { $_ -match 'filter' }) | ForEach-Object { $_ | Should -Match 'label=com\.docker\.compose\.project=wpdtest-acme$' }
+        }
+        It 'leaves a non-wpd folder alone (with and without -Force) but still removes leftover docker objects and certs' {
+            $plain = Join-Path $env:WPD_SITES_ROOT 'plain'
+            New-Item -ItemType Directory $plain | Out-Null
+            Set-Content (Join-Path $plain 'docker-compose.yml') 'services: {}'   # someone else's compose file
+            Set-Content (Join-Path $plain 'precious.txt') 'mine'
+            $infra = Join-Path $env:WPD_HOME 'infra'
+            New-Item -ItemType Directory (Join-Path $infra 'certs') -Force | Out-Null
+            Set-Content (Join-Path $infra 'certs/plain.pem') 'x'
+            $script:psOutput = @('c1')
+            $q = $null
+            { Remove-WpdSite plain -Ask { param($x) $script:q = $x; 'y' } 3>$null } | Should -Not -Throw
+            $script:q | Should -Match 'NOT a wpd site'
+            Remove-WpdSite plain -Force 3>$null
+            Test-Path (Join-Path $plain 'precious.txt') | Should -BeTrue
+            Test-Path (Join-Path $plain 'docker-compose.yml') | Should -BeTrue
+            Test-Path (Join-Path $infra 'certs/plain.pem') | Should -BeFalse
+            ($script:calls | Where-Object { $_ -eq 'rm -f -v c1' }) | Should -Not -BeNullOrEmpty
+        }
+        It 'leaves a folder with no compose file at all alone' {
+            $bare = Join-Path $env:WPD_SITES_ROOT 'bare'
+            New-Item -ItemType Directory $bare | Out-Null
+            Set-Content (Join-Path $bare 'keep.txt') 'x'
+            Remove-WpdSite bare -Force 3>$null
+            Test-Path (Join-Path $bare 'keep.txt') | Should -BeTrue
         }
         It 'rejects path-like names and unknown sites' {
             { Remove-WpdSite '..\other' -Force } | Should -Throw '*Invalid site name*'
@@ -282,7 +410,7 @@ Describe 'Site integration (real Docker, alternate ports)' -Tag Integration -Ski
         [IO.File]::WriteAllText((Join-Path $dir 'docker-compose.yml'), $y)
         $cfg = (& docker compose -f (Join-Path $dir 'docker-compose.yml') --profile tools config --format json) -join "`n" | ConvertFrom-Json
         $LASTEXITCODE | Should -Be 0
-        $cfg.services.wordpress.labels.'traefik.http.routers.wpd-acme.rule' | Should -Be 'Host(`acme.test`)'
+        $cfg.services.wordpress.labels.'traefik.http.routers.wpd-acme_wp.rule' | Should -Be 'Host(`acme.test`)'
         $themes = $cfg.services.wordpress.volumes | Where-Object { $_.target -eq '/var/www/html/wp-content/themes' }
         $themes.type | Should -Be 'bind'
         $themes.source | Should -Be (Join-Path $dir 'wp-content/themes').Replace('\', '\')
