@@ -1,6 +1,33 @@
 # wpd
 
-Create new WordPress sites, or clone live ones, into Docker and serve them at `https://<name>.test` with trusted HTTPS. A small PowerShell 7 CLI for Windows 11 and macOS.
+**WordPress on Docker, at `https://<name>.test`, with a trusted padlock.** One command to create a blank site, or clone a live one, so you can drop Laragon, XAMPP or MAMP.
+
+A small PowerShell 7 CLI for Windows 11 and macOS, with an optional Claude skill.
+
+```text
+$ wpd new acme
+Creating acme (https://acme.test, PHP 8.3)...
+Waiting for WordPress files...
+Installing WordPress...
+
+Site ready: https://acme.test
+Admin login: admin / <generated password>
+Folder: D:\Sitescme (credentials in .wpd-credentials.txt)
+
+$ wpd list
+Name Url                Running
+---- ---                -------
+acme https://acme.test     True
+```
+
+(Output above is from a real run, shortened. The throwaway run used alternate ports, so its URL ended in `:8443`; a normal install uses plain 80/443.)
+
+## Why
+
+- One command per job: `wpd new` for a blank site, `wpd clone` for a live one.
+- Real HTTPS (mkcert) and automatic `.test` DNS. No hosts-file edits, no admin prompt per site.
+- Cloned sites are made safe: mail is caught locally, cron is off, live URLs are rewritten.
+- 1 to 2 sites at once is the design target. Docker keeps everything isolated and removable.
 
 ## Status (read this first)
 
@@ -16,12 +43,38 @@ Create new WordPress sites, or clone live ones, into Docker and serve them at `h
 - mkcert (`winget install FiloSottile.mkcert` on Windows, `brew install mkcert` on macOS). `wpd setup` installs it if missing.
 - git.
 
-## Install
+## Quick start
 
-```
-git clone <this repo> wpd
+```powershell
+git clone https://github.com/fysalyaqoob/wp-docker.git wpd
 cd wpd
-pwsh ./wpd.ps1 setup
+pwsh ./wpd.ps1 setup          # once per machine
+pwsh ./wpd.ps1 new mysite     # then open https://mysite.test
+```
+
+`wpd doctor` checks the whole setup and prints a fix for each failure. Real output from a healthy install (alternate test ports):
+
+```text
+$ wpd doctor
+[ ok ] Docker running
+[ ok ] Port 8080 free for Traefik
+[ ok ] Port 8443 free for Traefik
+[ ok ] Port 5354 free for DNS
+[ ok ] mkcert installed
+[ ok ] mkcert CA trusted
+[ ok ] .test DNS hook registered
+[ ok ] Network wpdshot-net exists
+[ ok ] Traefik container (wpdshot-traefik) up
+[ ok ] DNS container (wpdshot-dns) up
+```
+
+## How it works
+
+```text
+browser -> https://acme.test
+   |  .test DNS rule (NRPT / resolver) -> dnsmasq container -> 127.0.0.1
+   v
+Traefik (80/443, mkcert certs)  ->  per-site containers: WordPress + MariaDB + Mailpit
 ```
 
 Optional: make `wpd` shorter to type. PowerShell profile: `function wpd { pwsh /path/to/wpd/wpd.ps1 @args }`, or put the repo folder on your PATH and add a small `wpd` wrapper script.
